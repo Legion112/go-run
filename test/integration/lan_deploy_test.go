@@ -82,14 +82,24 @@ func TestLANDeploy_PortForwardHomeIsolation(t *testing.T) {
 	must(t, lab.ExecOK(ctx, "ru-dest", "ip", "route", "replace", "default", "via", "10.200.0.2"))
 	must(t, lab.ExecOK(ctx, "foreign-dest", "ip", "route", "replace", "default", "via", "10.30.0.2"))
 
-	// Router: DNAT only WG clients UDP 51821 → gotun dmz; masquerade for return path
+	// Router: DNAT WG UDP/51821 → gotun DMZ; forward filter allows only that new flow (+ established).
 	must(t, lab.ExecOK(ctx, "router", "bash", "-c", `
 set -e
+WAN_IF=$(ip -o -4 addr show | awk '/10\.40\.0\.2\//{print $2; exit}' | cut -d@ -f1)
+DMZ_IF=$(ip -o -4 addr show | awk '/10\.41\.0\.2\//{print $2; exit}' | cut -d@ -f1)
+test -n "$WAN_IF" && test -n "$DMZ_IF"
+
 nft add table ip nat
 nft 'add chain ip nat prerouting { type nat hook prerouting priority -100 ; }'
 nft 'add chain ip nat postrouting { type nat hook postrouting priority 100 ; }'
 nft add rule ip nat prerouting udp dport 51821 dnat to 10.41.0.3:51821
 nft add rule ip nat postrouting oifname != "lo" masquerade
+
+# Consumer-NAT-like forward: established return OK; new WAN→DMZ only WG UDP to gotun.
+nft add table inet filter
+nft 'add chain inet filter forward { type filter hook forward priority 0 ; policy drop ; }'
+nft add rule inet filter forward ct state established,related accept
+nft add rule inet filter forward iifname "$WAN_IF" oifname "$DMZ_IF" udp dport 51821 ip daddr 10.41.0.3 accept
 `))
 
 	gotunPriv, gotunPub := genWGKeys(t, lab, "gotun")
@@ -152,6 +162,11 @@ AllowedIPs = 10.98.0.2/32
 		"-tunnel-up", "true",
 	))
 
+	// Temporary DMZ listener on gotun — used only to prove WAN cannot route to DMZ except WG DNAT.
+	must(t, lab.ExecOK(ctx, "gotun", "bash", "-c",
+		`labhttp -listen 10.41.0.3:18080 -body DMZ >/tmp/dmz-http.log 2>&1 &`))
+	time.Sleep(200 * time.Millisecond)
+
 	// home-pc: gateway is gotun LAN IP only
 	must(t, lab.ExecOK(ctx, "home-pc", "ip", "route", "replace", "default", "via", "10.10.0.2"))
 
@@ -170,7 +185,7 @@ ip route replace 10.10.0.0/24 dev wg-clients
 
 	// --- assertions ---
 
-	// 1: handshake via port-forward
+	// 1: handshake via port-forward (positive: WAN → router:51821 DNAT → gotun DMZ WG)
 	_, _ = lab.Exec(ctx, "wan-peer", "ping", "-c", "1", "-W", "2", "10.98.0.1")
 	hs, err := lab.Exec(ctx, "wan-peer", "wg", "show", "wg-clients", "latest-handshakes")
 	if err != nil {
@@ -179,15 +194,18 @@ ip route replace 10.10.0.0/24 dev wg-clients
 	if !strings.Contains(hs, clientsPub) {
 		t.Fatalf("expected handshake with clients peer via port-forward, got %q", hs)
 	}
-	// require a non-zero unix timestamp in the handshake line
 	fields := strings.Fields(hs)
 	if len(fields) < 2 || fields[len(fields)-1] == "0" {
 		t.Fatalf("expected completed handshake (non-zero timestamp), got %q", hs)
 	}
 
-	// 1b: non-forwarded WAN port must fail
+	// A (weak): nothing listening on router WAN itself — not the WAN-firewall property.
 	if _, err := lab.Exec(ctx, "wan-peer", "curl", "-s", "--connect-timeout", "2", "--max-time", "3", "http://10.40.0.2:9/"); err == nil {
 		t.Fatal("non-forwarded router WAN port should fail")
+	}
+	// B (important): WAN must not reach gotun DMZ by routing through the router (only WG DNAT allowed).
+	if _, err := lab.Exec(ctx, "wan-peer", "curl", "-s", "--connect-timeout", "2", "--max-time", "3", "http://10.41.0.3:18080/"); err == nil {
+		t.Fatal("wan-peer must not reach gotun DMZ listener through router (port-forward-only boundary)")
 	}
 
 	// 2: home-pc uses gotun LAN, not WAN/dmz
