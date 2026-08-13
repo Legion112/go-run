@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/legion/go-tun/internal/linux"
@@ -50,31 +51,74 @@ func Reconcile(r linux.Runner, rules []policy.IPRuleSpec, routes []policy.RouteS
 }
 
 func tableRoutesMatch(out string, want []policy.RouteSpec) bool {
+	live := parseRouteKeys(out)
+	desired := map[string]struct{}{}
 	for _, rt := range want {
-		if !routePresent(out, rt) {
+		desired[routeKey(rt)] = struct{}{}
+	}
+	if len(live) != len(desired) {
+		return false
+	}
+	for k := range desired {
+		if _, ok := live[k]; !ok {
 			return false
 		}
 	}
 	return true
 }
 
-func routePresent(out string, rt policy.RouteSpec) bool {
+func routeKey(rt policy.RouteSpec) string {
+	metric := rt.Metric
 	if rt.Blackhole {
-		if !strings.Contains(out, "blackhole") && !strings.Contains(out, "unreachable") {
-			return false
+		return fmt.Sprintf("blackhole|default|metric=%d", metric)
+	}
+	return fmt.Sprintf("dev=%s|default|metric=%d", rt.Device, metric)
+}
+
+func parseRouteKeys(out string) map[string]struct{} {
+	keys := map[string]struct{}{}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
-		if rt.Metric > 0 && !strings.Contains(out, fmt.Sprintf("metric %d", rt.Metric)) {
-			return false
+		if k, ok := parseRouteLine(line); ok {
+			keys[k] = struct{}{}
 		}
-		return true
 	}
-	if rt.Device == "" || !strings.Contains(out, "dev "+rt.Device) {
-		return false
+	return keys
+}
+
+func parseRouteLine(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", false
 	}
-	if rt.Metric > 0 && !strings.Contains(out, fmt.Sprintf("metric %d", rt.Metric)) {
-		return false
+	metric := 0
+	for i := 0; i+1 < len(fields); i++ {
+		if fields[i] == "metric" {
+			metric, _ = strconv.Atoi(fields[i+1])
+		}
 	}
-	return true
+	switch {
+	case fields[0] == "blackhole" || fields[0] == "unreachable":
+		// blackhole default [metric N]
+		return fmt.Sprintf("blackhole|default|metric=%d", metric), true
+	case fields[0] == "default":
+		dev := ""
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "dev" {
+				dev = fields[i+1]
+				break
+			}
+		}
+		if dev == "" {
+			return "", false
+		}
+		return fmt.Sprintf("dev=%s|default|metric=%d", dev, metric), true
+	default:
+		return "", false
+	}
 }
 
 func addRoute(r linux.Runner, rt policy.RouteSpec) error {

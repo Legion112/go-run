@@ -56,6 +56,8 @@ type liveRule struct {
 	Chain   string
 	Comment string
 	Mark    *uint32
+	// DAddrs are ip daddr match targets (addr or addr/len), normalized as strings.
+	DAddrs []string
 }
 
 func semanticMatchJSON(out string, spec policy.NftSpec) bool {
@@ -106,10 +108,18 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 	case want.DropIPv6:
 		return countComments(rules, chain, "drop-ipv6") >= 1
 	case want.Description == "mark-non-direct":
-		if countComments(rules, chain, "exclude-lan") < len(want.ExcludePrefixes) {
+		wantLAN := map[string]struct{}{}
+		for _, p := range want.ExcludePrefixes {
+			wantLAN[p.String()] = struct{}{}
+		}
+		wantEP := map[string]struct{}{}
+		for _, a := range want.ExcludeAddrs {
+			wantEP[a.String()] = struct{}{}
+		}
+		if !stringSetsEqual(daddrsForComment(rules, chain, "exclude-lan"), wantLAN) {
 			return false
 		}
-		if countComments(rules, chain, "exclude-endpoint") < len(want.ExcludeAddrs) {
+		if !stringSetsEqual(daddrsForComment(rules, chain, "exclude-endpoint"), wantEP) {
 			return false
 		}
 		for _, r := range rules {
@@ -131,6 +141,31 @@ func countComments(rules []liveRule, chain, comment string) int {
 		}
 	}
 	return n
+}
+
+func daddrsForComment(rules []liveRule, chain, comment string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, r := range rules {
+		if r.Chain != chain || r.Comment != comment {
+			continue
+		}
+		for _, d := range r.DAddrs {
+			out[d] = struct{}{}
+		}
+	}
+	return out
+}
+
+func stringSetsEqual(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func parseNftJSON(out string) (liveNft, error) {
@@ -252,6 +287,7 @@ func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
 	if m, ok := findMarkInExpr(rule.Expr); ok {
 		r.Mark = &m
 	}
+	r.DAddrs = findDAddrsInExpr(rule.Expr)
 	return r, rule.Chain != ""
 }
 
@@ -276,7 +312,6 @@ func findMarkInExpr(exprs []json.RawMessage) (uint32, bool) {
 				}
 			}
 		}
-		// Recurse into nested arrays occasionally present in expr trees.
 		for _, v := range obj {
 			var nested []json.RawMessage
 			if json.Unmarshal(v, &nested) == nil {
@@ -287,6 +322,94 @@ func findMarkInExpr(exprs []json.RawMessage) (uint32, bool) {
 		}
 	}
 	return 0, false
+}
+
+func findDAddrsInExpr(exprs []json.RawMessage) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	var walk func([]json.RawMessage)
+	walk = func(exprs []json.RawMessage) {
+		for _, raw := range exprs {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				continue
+			}
+			if mraw, ok := obj["match"]; ok {
+				if d, ok := daddrFromMatch(mraw); ok {
+					if _, dup := seen[d]; !dup {
+						seen[d] = struct{}{}
+						out = append(out, d)
+					}
+				}
+			}
+			for _, v := range obj {
+				var nested []json.RawMessage
+				if json.Unmarshal(v, &nested) == nil {
+					walk(nested)
+				}
+			}
+		}
+	}
+	walk(exprs)
+	return out
+}
+
+func daddrFromMatch(mraw json.RawMessage) (string, bool) {
+	var m struct {
+		Left  json.RawMessage `json:"left"`
+		Right json.RawMessage `json:"right"`
+	}
+	if err := json.Unmarshal(mraw, &m); err != nil {
+		return "", false
+	}
+	if !isIPDAddrPayload(m.Left) {
+		return "", false
+	}
+	return matchRightToString(m.Right)
+}
+
+func isIPDAddrPayload(left json.RawMessage) bool {
+	var payloadWrap struct {
+		Payload struct {
+			Protocol string `json:"protocol"`
+			Field    string `json:"field"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(left, &payloadWrap) == nil &&
+		payloadWrap.Payload.Protocol == "ip" && payloadWrap.Payload.Field == "daddr" {
+		return true
+	}
+	// Some nft versions nest as {"payload":{...}} already unwrapped above;
+	// also accept direct payload object.
+	var payload struct {
+		Protocol string `json:"protocol"`
+		Field    string `json:"field"`
+	}
+	return json.Unmarshal(left, &payload) == nil && payload.Protocol == "ip" && payload.Field == "daddr"
+}
+
+func matchRightToString(right json.RawMessage) (string, bool) {
+	var s string
+	if err := json.Unmarshal(right, &s); err == nil && s != "" {
+		return s, true
+	}
+	var prefWrap struct {
+		Prefix struct {
+			Addr string `json:"addr"`
+			Len  int    `json:"len"`
+		} `json:"prefix"`
+	}
+	if json.Unmarshal(right, &prefWrap) == nil && prefWrap.Prefix.Addr != "" {
+		return fmt.Sprintf("%s/%d", prefWrap.Prefix.Addr, prefWrap.Prefix.Len), true
+	}
+	var pref struct {
+		Addr string `json:"addr"`
+		Len  int    `json:"len"`
+	}
+	if json.Unmarshal(right, &pref) == nil && pref.Addr != "" {
+		return fmt.Sprintf("%s/%d", pref.Addr, pref.Len), true
+	}
+	return "", false
 }
 
 func parseJSONUint32(raw json.RawMessage) (uint32, bool) {

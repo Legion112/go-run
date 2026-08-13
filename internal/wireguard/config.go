@@ -2,6 +2,8 @@ package wireguard
 
 import (
 	"fmt"
+	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/legion/go-tun/internal/linux"
@@ -39,9 +41,7 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		return changes, nil
 	}
 
-	// If interface already up and peer configured, treat as semantic match for idempotency.
-	wgOut, _ := r.Run("wg", "show", iface)
-	if !missing && strings.Contains(wgOut, spec.Peer.PublicKey) && strings.Contains(link, "UP") {
+	if !missing && semanticMatch(r, iface, link, spec) {
 		return changes, nil
 	}
 
@@ -98,6 +98,118 @@ func Reconcile(r linux.Runner, spec policy.WireGuardSpec) (int, error) {
 		changes++
 	}
 	return changes, nil
+}
+
+func semanticMatch(r linux.Runner, iface, link string, spec policy.WireGuardSpec) bool {
+	if !strings.Contains(link, "UP") {
+		return false
+	}
+	dump, err := r.Run("wg", "show", iface, "dump")
+	if err != nil || dump == "" {
+		return false
+	}
+	live, ok := parseWGDump(dump)
+	if !ok {
+		return false
+	}
+	if live.PrivateKey != spec.PrivateKey {
+		return false
+	}
+	if spec.ListenPort > 0 && live.ListenPort != spec.ListenPort {
+		return false
+	}
+	if live.PeerPublicKey != spec.Peer.PublicKey {
+		return false
+	}
+	if live.Endpoint != spec.Peer.Endpoint {
+		return false
+	}
+	if live.Keepalive != spec.Peer.PersistentKeepalive {
+		return false
+	}
+	wantIPs := map[string]struct{}{}
+	for _, p := range spec.Peer.AllowedIPs {
+		wantIPs[p.String()] = struct{}{}
+	}
+	if len(wantIPs) != len(live.AllowedIPs) {
+		return false
+	}
+	for ip := range wantIPs {
+		if _, ok := live.AllowedIPs[ip]; !ok {
+			return false
+		}
+	}
+	if spec.Address.IsValid() {
+		addrOut, err := r.Run("ip", "-4", "addr", "show", "dev", iface)
+		if err != nil || !strings.Contains(addrOut, spec.Address.String()) {
+			// Also accept "inet 10.99.0.1/30" style without requiring exact Prefix.String()
+			if err != nil || !addrContainsPrefix(addrOut, spec.Address) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type liveWG struct {
+	PrivateKey    string
+	ListenPort    int
+	PeerPublicKey string
+	Endpoint      string
+	AllowedIPs    map[string]struct{}
+	Keepalive     int
+}
+
+// parseWGDump parses `wg show <iface> dump` output.
+// Line 1 (iface): private-key  public-key  listen-port  fwmark
+// Peer lines:     public-key   psk         endpoint     allowed-ips  ...  persistent-keepalive
+func parseWGDump(out string) (liveWG, bool) {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) < 1 {
+		return liveWG{}, false
+	}
+	ifaceFields := strings.Split(lines[0], "\t")
+	if len(ifaceFields) < 3 {
+		return liveWG{}, false
+	}
+	port, _ := strconv.Atoi(ifaceFields[2])
+	live := liveWG{
+		PrivateKey: ifaceFields[0],
+		ListenPort: port,
+		AllowedIPs: map[string]struct{}{},
+	}
+	if len(lines) < 2 {
+		return live, true
+	}
+	peerFields := strings.Split(lines[1], "\t")
+	if len(peerFields) < 4 {
+		return live, false
+	}
+	live.PeerPublicKey = peerFields[0]
+	if peerFields[2] != "(none)" {
+		live.Endpoint = peerFields[2]
+	}
+	for _, ip := range strings.Split(peerFields[3], ",") {
+		ip = strings.TrimSpace(ip)
+		if ip == "" || ip == "(none)" {
+			continue
+		}
+		live.AllowedIPs[ip] = struct{}{}
+	}
+	if len(peerFields) >= 8 {
+		ka, _ := strconv.Atoi(peerFields[7])
+		live.Keepalive = ka
+	}
+	return live, true
+}
+
+func addrContainsPrefix(addrOut string, want netip.Prefix) bool {
+	needle := want.String()
+	if strings.Contains(addrOut, needle) {
+		return true
+	}
+	// "inet 10.99.0.1/30" without matching Prefix.String() quirks
+	return strings.Contains(addrOut, want.Addr().String()+"/"+strconv.Itoa(want.Bits()))
 }
 
 // SetDown brings the interface down (for fail-closed tests).

@@ -139,8 +139,8 @@ func sampleNftListJSON() string {
 {"set":{"family":"inet","name":"ru_nets","table":"gotun","type":"ipv4_addr","flags":["interval"],"elem":["10.200.0.0/24"]}},
 {"chain":{"family":"inet","table":"gotun","name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"drop-ipv6","expr":[]}},
-{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-lan","expr":[]}},
-{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-endpoint","expr":[]}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-endpoint","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"10.10.0.2"}}]}},
 {"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}}
 ]}`
 }
