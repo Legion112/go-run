@@ -45,9 +45,15 @@ make test-large-set     # GOTUN_LARGE_SET=1; Docker --network none; needs local 
 ```
 
 
+## Fail-closed + endpoint exclusion
+
+Table **100 always** ends with a terminal **blackhole** default (high metric). When the tunnel is up, a lower-metric `default dev wg0` is preferred. If `wg0` disappears **without** a control-plane reapply, marked (non-RU) traffic still hits the blackhole and does **not** fall through RPDB into the ISP/`main` table. `-tunnel-up=false` installs only the blackhole. RU (unmarked) traffic continues on the main table.
+
+The WireGuard **underlay endpoint IP** is excluded from marking so handshake/path cannot recurse into `wg0`.
+
 ## Why nftables
 
-Greenfield choice: one rule system, native interval sets, atomic set replacement (no flush-then-repopulate window). Not an iptables+ipset stack.
+Greenfield choice: one rule system, native interval sets, and **single-transaction** table replacement via one `nft -f` batch (delete+recreate owned table atomically). Not an iptables+ipset stack.
 
 ## Ownership
 
@@ -66,12 +72,6 @@ Re-applying the **same** `Policy` must be a **semantic no-op** (no meaningful ke
 ## Partial failure
 
 v1 has **no** cross-subsystem transaction (nft + netlink + WireGuard). On mid-apply failure the command exits non-zero; some owned objects may already be updated. Recovery is a successful full `gotun apply`.
-
-## Fail-closed + endpoint exclusion
-
-When the tunnel is down (`-tunnel-up=false` or equivalent), marked (non-RU) traffic uses a **blackhole** default in table 100 — it does **not** fall back to the ISP default route. RU (unmarked) traffic continues on the main table.
-
-The WireGuard **underlay endpoint IP** is excluded from marking so handshake/path cannot recurse into `wg0`.
 
 ## DNS (v1)
 
@@ -93,7 +93,7 @@ Containers: `client`, `gotun`, `exit`, `ru-dest`, `foreign-dest`.
 |------|----------|
 | client → RU IP | via gotun direct (not wg0/exit) |
 | client → foreign IP | via gotun wg0 → exit |
-| WG down | foreign fails; RU works |
+| WG down (no reapply) | foreign fails; RU works |
 | endpoint IP | not via wg0 |
 
 ## Build & test

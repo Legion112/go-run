@@ -29,29 +29,70 @@ func Reconcile(r linux.Runner, rules []policy.IPRuleSpec, routes []policy.RouteS
 		changes++
 	}
 
+	byTable := map[int][]policy.RouteSpec{}
 	for _, rt := range routes {
-		out, _ := r.Run("ip", "route", "show", "table", fmt.Sprintf("%d", rt.Table))
-		if rt.Blackhole {
-			if strings.Contains(out, "blackhole") || strings.Contains(out, "unreachable") {
-				continue
-			}
-			_, _ = r.Run("ip", "route", "flush", "table", fmt.Sprintf("%d", rt.Table))
-			if _, err := r.Run("ip", "route", "replace", "blackhole", "default", "table", fmt.Sprintf("%d", rt.Table)); err != nil {
+		byTable[rt.Table] = append(byTable[rt.Table], rt)
+	}
+	for table, want := range byTable {
+		out, _ := r.Run("ip", "route", "show", "table", fmt.Sprintf("%d", table))
+		if tableRoutesMatch(out, want) {
+			continue
+		}
+		_, _ = r.Run("ip", "route", "flush", "table", fmt.Sprintf("%d", table))
+		for _, rt := range want {
+			if err := addRoute(r, rt); err != nil {
 				return changes, err
 			}
-			changes++
-			continue
-		}
-		if rt.Device != "" && strings.Contains(out, "dev "+rt.Device) {
-			continue
-		}
-		_, _ = r.Run("ip", "route", "flush", "table", fmt.Sprintf("%d", rt.Table))
-		if _, err := r.Run("ip", "route", "replace", "default", "dev", rt.Device, "table", fmt.Sprintf("%d", rt.Table)); err != nil {
-			return changes, err
 		}
 		changes++
 	}
 	return changes, nil
+}
+
+func tableRoutesMatch(out string, want []policy.RouteSpec) bool {
+	for _, rt := range want {
+		if !routePresent(out, rt) {
+			return false
+		}
+	}
+	return true
+}
+
+func routePresent(out string, rt policy.RouteSpec) bool {
+	if rt.Blackhole {
+		if !strings.Contains(out, "blackhole") && !strings.Contains(out, "unreachable") {
+			return false
+		}
+		if rt.Metric > 0 && !strings.Contains(out, fmt.Sprintf("metric %d", rt.Metric)) {
+			return false
+		}
+		return true
+	}
+	if rt.Device == "" || !strings.Contains(out, "dev "+rt.Device) {
+		return false
+	}
+	if rt.Metric > 0 && !strings.Contains(out, fmt.Sprintf("metric %d", rt.Metric)) {
+		return false
+	}
+	return true
+}
+
+func addRoute(r linux.Runner, rt policy.RouteSpec) error {
+	table := fmt.Sprintf("%d", rt.Table)
+	if rt.Blackhole {
+		args := []string{"route", "replace", "blackhole", "default", "table", table}
+		if rt.Metric > 0 {
+			args = append(args, "metric", fmt.Sprintf("%d", rt.Metric))
+		}
+		_, err := r.Run("ip", args...)
+		return err
+	}
+	args := []string{"route", "replace", "default", "dev", rt.Device, "table", table}
+	if rt.Metric > 0 {
+		args = append(args, "metric", fmt.Sprintf("%d", rt.Metric))
+	}
+	_, err := r.Run("ip", args...)
+	return err
 }
 
 // Clear removes owned rules and flushes the routing table.

@@ -3,6 +3,8 @@ package nftables
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/legion/go-tun/internal/linux"
@@ -12,61 +14,296 @@ import (
 // ElementBatchSize is how many CIDRs to put in each nft "add element" statement.
 const ElementBatchSize = 4000
 
-// largeSetThreshold: above this, semantic match uses JSON element count instead of per-CIDR Contains.
-const largeSetThreshold = 1000
-
-// Reconcile applies owned nftables table state with atomic set population.
+// Reconcile applies owned nftables table state in a single nft -f transaction.
 // Returns number of semantic changes applied.
 func Reconcile(r linux.Runner, spec policy.NftSpec) (int, error) {
 	changes := 0
 	family, table := spec.Family, spec.Table
 
-	listed, err := r.Run("nft", "list", "table", family, table)
-	tableExists := err == nil && listed != "" && !strings.Contains(listed, "Error")
+	listedJSON, err := r.Run("nft", "-j", "list", "table", family, table)
+	tableExists := err == nil && listedJSON != "" && !strings.Contains(listedJSON, "Error")
 
-	if tableExists && semanticMatch(r, listed, spec) {
+	if tableExists && semanticMatchJSON(listedJSON, spec) {
 		return 0, nil
 	}
 
-	script := RenderFullTable(spec)
+	var b strings.Builder
 	if tableExists {
-		if _, err := r.Run("nft", "delete", "table", family, table); err != nil {
-			return changes, err
-		}
-		changes++
+		fmt.Fprintf(&b, "delete table %s %s\n", family, table)
 	}
-	if _, err := r.RunWithInput("nft", script, "-f", "-"); err != nil {
+	b.WriteString(RenderFullTable(spec))
+	if _, err := r.RunWithInput("nft", b.String(), "-f", "-"); err != nil {
 		return changes, fmt.Errorf("nft apply table: %w", err)
 	}
 	changes++
 	return changes, nil
 }
 
-func semanticMatch(r linux.Runner, listed string, spec policy.NftSpec) bool {
-	if !strings.Contains(listed, "table "+spec.Family+" "+spec.Table) && !strings.Contains(listed, "table inet gotun") {
+type liveNft struct {
+	sets   map[string]map[string]struct{}
+	chains map[string]liveChain
+	rules  []liveRule
+}
+
+type liveChain struct {
+	Type     string
+	Hook     string
+	Priority int
+	Policy   string
+}
+
+type liveRule struct {
+	Chain   string
+	Comment string
+	Mark    *uint32
+}
+
+func semanticMatchJSON(out string, spec policy.NftSpec) bool {
+	live, err := parseNftJSON(out)
+	if err != nil {
 		return false
 	}
-	if !strings.Contains(listed, "mark-non-direct") && !strings.Contains(listed, "meta mark set") {
-		return false
+	if live.sets == nil {
+		live.sets = map[string]map[string]struct{}{}
 	}
 	for _, set := range spec.Sets {
-		if !strings.Contains(listed, set.Name) {
+		have, ok := live.sets[set.Name]
+		if !ok {
 			return false
 		}
-		if len(set.Elements) > largeSetThreshold {
-			n, err := CountSetElements(r, spec.Family, spec.Table, set.Name)
-			if err != nil || n != len(set.Elements) {
+		want := map[string]struct{}{}
+		for _, el := range set.Elements {
+			want[el.String()] = struct{}{}
+		}
+		if len(have) != len(want) {
+			return false
+		}
+		for cidr := range want {
+			if _, ok := have[cidr]; !ok {
 				return false
 			}
-			continue
 		}
-		for _, el := range set.Elements {
-			if !strings.Contains(listed, el.String()) {
+	}
+	for _, ch := range spec.Chains {
+		liveCh, ok := live.chains[ch.Name]
+		if !ok {
+			return false
+		}
+		if liveCh.Type != ch.Type || liveCh.Hook != ch.Hook || liveCh.Priority != ch.Priority || liveCh.Policy != ch.Policy {
+			return false
+		}
+		for _, rule := range ch.Rules {
+			if !liveHasRule(live.rules, ch.Name, rule) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
+	switch {
+	case want.DropIPv6:
+		return countComments(rules, chain, "drop-ipv6") >= 1
+	case want.Description == "mark-non-direct":
+		if countComments(rules, chain, "exclude-lan") < len(want.ExcludePrefixes) {
+			return false
+		}
+		if countComments(rules, chain, "exclude-endpoint") < len(want.ExcludeAddrs) {
+			return false
+		}
+		for _, r := range rules {
+			if r.Chain == chain && r.Comment == "mark-non-direct" {
+				return r.Mark != nil && *r.Mark == want.Mark
+			}
+		}
+		return false
+	default:
+		return countComments(rules, chain, want.Description) >= 1
+	}
+}
+
+func countComments(rules []liveRule, chain, comment string) int {
+	n := 0
+	for _, r := range rules {
+		if r.Chain == chain && r.Comment == comment {
+			n++
+		}
+	}
+	return n
+}
+
+func parseNftJSON(out string) (liveNft, error) {
+	var root struct {
+		Nftables []json.RawMessage `json:"nftables"`
+	}
+	if err := json.Unmarshal([]byte(out), &root); err != nil {
+		return liveNft{}, err
+	}
+	live := liveNft{
+		sets:   map[string]map[string]struct{}{},
+		chains: map[string]liveChain{},
+	}
+	for _, raw := range root.Nftables {
+		var wrap map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &wrap); err != nil {
+			continue
+		}
+		if setRaw, ok := wrap["set"]; ok {
+			name, elems := parseSetJSON(setRaw)
+			if name != "" {
+				live.sets[name] = elems
+			}
+			continue
+		}
+		if chainRaw, ok := wrap["chain"]; ok {
+			name, ch, ok := parseChainJSON(chainRaw)
+			if ok {
+				live.chains[name] = ch
+			}
+			continue
+		}
+		if ruleRaw, ok := wrap["rule"]; ok {
+			if r, ok := parseRuleJSON(ruleRaw); ok {
+				live.rules = append(live.rules, r)
+			}
+		}
+	}
+	return live, nil
+}
+
+func parseSetJSON(raw json.RawMessage) (string, map[string]struct{}) {
+	var setObj struct {
+		Name string            `json:"name"`
+		Elem []json.RawMessage `json:"elem"`
+	}
+	if err := json.Unmarshal(raw, &setObj); err != nil {
+		return "", nil
+	}
+	elems := map[string]struct{}{}
+	for _, e := range setObj.Elem {
+		if cidr, ok := elemToCIDR(e); ok {
+			elems[cidr] = struct{}{}
+		}
+	}
+	return setObj.Name, elems
+}
+
+func elemToCIDR(raw json.RawMessage) (string, bool) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil && strings.Contains(s, "/") {
+		return s, true
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return "", false
+	}
+	if p, ok := obj["prefix"]; ok {
+		var pref struct {
+			Addr string `json:"addr"`
+			Len  int    `json:"len"`
+		}
+		if json.Unmarshal(p, &pref) == nil && pref.Addr != "" {
+			return fmt.Sprintf("%s/%d", pref.Addr, pref.Len), true
+		}
+	}
+	// Nested {"elem": ...} wrappers used by some nft versions.
+	if inner, ok := obj["elem"]; ok {
+		return elemToCIDR(inner)
+	}
+	if val, ok := obj["val"]; ok {
+		return elemToCIDR(val)
+	}
+	return "", false
+}
+
+func parseChainJSON(raw json.RawMessage) (string, liveChain, bool) {
+	var ch struct {
+		Name     string `json:"name"`
+		Type     string `json:"type"`
+		Hook     string `json:"hook"`
+		Prio     *int   `json:"prio"`
+		Priority *int   `json:"priority"`
+		Policy   string `json:"policy"`
+	}
+	if err := json.Unmarshal(raw, &ch); err != nil || ch.Name == "" {
+		return "", liveChain{}, false
+	}
+	prio := 0
+	switch {
+	case ch.Prio != nil:
+		prio = *ch.Prio
+	case ch.Priority != nil:
+		prio = *ch.Priority
+	}
+	return ch.Name, liveChain{Type: ch.Type, Hook: ch.Hook, Priority: prio, Policy: ch.Policy}, true
+}
+
+func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
+	var rule struct {
+		Chain   string            `json:"chain"`
+		Comment string            `json:"comment"`
+		Expr    []json.RawMessage `json:"expr"`
+	}
+	if err := json.Unmarshal(raw, &rule); err != nil {
+		return liveRule{}, false
+	}
+	r := liveRule{Chain: rule.Chain, Comment: rule.Comment}
+	if m, ok := findMarkInExpr(rule.Expr); ok {
+		r.Mark = &m
+	}
+	return r, rule.Chain != ""
+}
+
+func findMarkInExpr(exprs []json.RawMessage) (uint32, bool) {
+	for _, raw := range exprs {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			continue
+		}
+		if mraw, ok := obj["mangle"]; ok {
+			var mangle struct {
+				Key struct {
+					Meta struct {
+						Key string `json:"key"`
+					} `json:"meta"`
+				} `json:"key"`
+				Value json.RawMessage `json:"value"`
+			}
+			if json.Unmarshal(mraw, &mangle) == nil && mangle.Key.Meta.Key == "mark" {
+				if v, ok := parseJSONUint32(mangle.Value); ok {
+					return v, true
+				}
+			}
+		}
+		// Recurse into nested arrays occasionally present in expr trees.
+		for _, v := range obj {
+			var nested []json.RawMessage
+			if json.Unmarshal(v, &nested) == nil {
+				if m, ok := findMarkInExpr(nested); ok {
+					return m, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+func parseJSONUint32(raw json.RawMessage) (uint32, bool) {
+	var n uint32
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n, true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		if strings.HasPrefix(s, "0x") {
+			v, err := strconv.ParseUint(s[2:], 16, 32)
+			return uint32(v), err == nil
+		}
+		v, err := strconv.ParseUint(s, 10, 32)
+		return uint32(v), err == nil
+	}
+	return 0, false
 }
 
 // RenderFullTable builds an nft -f script for the owned table (batched add element).
@@ -125,16 +362,12 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 	return lines
 }
 
-// SwapSetElements builds a new set, populates it in batches, and replaces live contents via nft -f.
+// SwapSetElements replaces live set contents via a single nft -f transaction.
 func SwapSetElements(r linux.Runner, family, table, liveName string, elements []string) (int, error) {
-	tmp := liveName + "_new"
+	sort.Strings(elements)
 	var b strings.Builder
-	fmt.Fprintf(&b, "delete set %s %s %s\n", family, table, tmp)
-	fmt.Fprintf(&b, "add set %s %s %s { type ipv4_addr; flags interval; }\n", family, table, tmp)
-	writeBatchedElements(&b, family, table, tmp, elements)
 	fmt.Fprintf(&b, "flush set %s %s %s\n", family, table, liveName)
 	writeBatchedElements(&b, family, table, liveName, elements)
-	fmt.Fprintf(&b, "delete set %s %s %s\n", family, table, tmp)
 	if _, err := r.RunWithInput("nft", b.String(), "-f", "-"); err != nil {
 		return 0, err
 	}
@@ -155,7 +388,6 @@ func countElementsJSON(out string) (int, error) {
 		Nftables []json.RawMessage `json:"nftables"`
 	}
 	if err := json.Unmarshal([]byte(out), &root); err != nil {
-		// Fallback: count "prefix" / CIDR-like tokens in non-JSON list output.
 		return strings.Count(out, "/"), fmt.Errorf("nft json: %w", err)
 	}
 	n := 0
@@ -168,13 +400,8 @@ func countElementsJSON(out string) (int, error) {
 		if !ok {
 			continue
 		}
-		var setObj struct {
-			Elem []json.RawMessage `json:"elem"`
-		}
-		if err := json.Unmarshal(setRaw, &setObj); err != nil {
-			continue
-		}
-		n += len(setObj.Elem)
+		_, elems := parseSetJSON(setRaw)
+		n += len(elems)
 	}
 	return n, nil
 }

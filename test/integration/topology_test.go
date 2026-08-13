@@ -188,12 +188,28 @@ func TestHappyPath_RUDirect_ForeignViaExit(t *testing.T) {
 	}
 }
 
-func TestFailClosed_WGDown(t *testing.T) {
+func TestFailClosed_WGDownWithoutReapply(t *testing.T) {
+	tp := setupTopo(t)
+	ctx := context.Background()
+
+	// Tear down the tunnel datapath without asking gotun to re-apply.
+	// Table 100 must still terminate marked traffic (blackhole fallback).
+	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg0", "down"))
+
+	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id"); err == nil {
+		t.Fatal("foreign should fail when wg0 disappears without reapply (fail-closed)")
+	}
+	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
+	if err != nil || strings.TrimSpace(ru) != "RU" {
+		t.Fatalf("RU should still work: %v %q", err, ru)
+	}
+}
+
+func TestFailClosed_ApplyTunnelDown(t *testing.T) {
 	tp := setupTopo(t)
 	ctx := context.Background()
 
 	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg0", "down"))
-	// Re-apply with tunnel-up=false to install blackhole (fail-closed)
 	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
@@ -203,7 +219,7 @@ func TestFailClosed_WGDown(t *testing.T) {
 	))
 
 	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id"); err == nil {
-		t.Fatal("foreign should fail when tunnel down (fail-closed)")
+		t.Fatal("foreign should fail when tunnel-up=false (fail-closed)")
 	}
 	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
 	if err != nil || strings.TrimSpace(ru) != "RU" {
@@ -240,9 +256,8 @@ func TestIdempotentApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// second apply should report 0 changes ideally
-	if !strings.Contains(out1, "0 changes") && !strings.Contains(out1, "changes") {
-		t.Fatalf("unexpected apply output: %q", out1)
+	if !strings.Contains(out1, "gotun apply: 0 changes") {
+		t.Fatalf("second apply must report exactly 0 changes, got %q", out1)
 	}
 	// traffic still works
 	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")

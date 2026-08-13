@@ -68,18 +68,55 @@ func TestCompile_FailClosedBlackhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(st.Routes) != 1 || !st.Routes[0].Blackhole {
-		t.Fatalf("want blackhole route, got %+v", st.Routes)
+	if len(st.Routes) != 1 || !st.Routes[0].Blackhole || st.Routes[0].Metric != policy.FailClosedRouteMetric {
+		t.Fatalf("want lone blackhole metric %d, got %+v", policy.FailClosedRouteMetric, st.Routes)
 	}
 }
 
-func TestCompile_TunnelUpDeviceRoute(t *testing.T) {
+func TestCompile_TunnelUpKeepsFailClosedFallback(t *testing.T) {
 	st, err := policy.Compile(testPolicy(true))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Routes[0].Blackhole || st.Routes[0].Device != "wg0" {
-		t.Fatalf("want wg0 route, got %+v", st.Routes[0])
+	if len(st.Routes) != 2 {
+		t.Fatalf("want device + blackhole routes, got %+v", st.Routes)
+	}
+	var haveDev, haveBH bool
+	for _, rt := range st.Routes {
+		if rt.Device == "wg0" && rt.Metric == policy.TunnelRouteMetric && !rt.Blackhole {
+			haveDev = true
+		}
+		if rt.Blackhole && rt.Metric == policy.FailClosedRouteMetric {
+			haveBH = true
+		}
+	}
+	if !haveDev || !haveBH {
+		t.Fatalf("want wg0 metric %d + blackhole metric %d, got %+v",
+			policy.TunnelRouteMetric, policy.FailClosedRouteMetric, st.Routes)
+	}
+}
+
+func TestSemanticEqual_IgnoresPrefixOrder(t *testing.T) {
+	a := testPolicy(true)
+	b := testPolicy(true)
+	b.DirectPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("10.200.1.0/24"),
+		netip.MustParsePrefix("10.200.0.0/24"),
+	}
+	a.DirectPrefixes = []netip.Prefix{
+		netip.MustParsePrefix("10.200.0.0/24"),
+		netip.MustParsePrefix("10.200.1.0/24"),
+	}
+	sa, err := policy.Compile(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := policy.Compile(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !policy.SemanticEqual(sa, sb) {
+		t.Fatal("expected equal after normalize despite prefix order")
 	}
 }
 

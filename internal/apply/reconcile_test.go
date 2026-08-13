@@ -84,6 +84,38 @@ func TestSwapSetElements_UsesTransaction(t *testing.T) {
 	}
 }
 
+func TestReconcile_NftSingleTransaction(t *testing.T) {
+	r := linux.NewRecordingRunner()
+	// Pretend table already exists with wrong contents so Reconcile must replace.
+	r.Outputs["nft -j list table inet gotun"] = `{"nftables":[{"table":{"family":"inet","name":"gotun"}},{"set":{"name":"ru_nets","elem":["1.2.3.0/24"]}}]}`
+	if _, err := apply.Reconcile(r, basePolicy()); err != nil {
+		t.Fatal(err)
+	}
+	var nftApply string
+	for i, c := range r.Calls {
+		if strings.Contains(c, "nft") && strings.Contains(c, "-f") && strings.Contains(c, "<<STDIN>>") {
+			if i+1 < len(r.Calls) && strings.HasPrefix(r.Calls[i+1], "STDIN:") {
+				nftApply = r.Calls[i+1]
+			}
+		}
+	}
+	if nftApply == "" {
+		t.Fatalf("expected single nft -f apply, calls=%v", r.Calls)
+	}
+	if !strings.Contains(nftApply, "delete table inet gotun") {
+		t.Fatalf("expected delete+add in one transaction, got %s", nftApply)
+	}
+	if !strings.Contains(nftApply, "add table inet gotun") {
+		t.Fatalf("expected add table in same transaction, got %s", nftApply)
+	}
+	// Must not issue a separate delete-table CLI call.
+	for _, c := range r.Calls {
+		if strings.HasPrefix(c, "nft delete table") {
+			t.Fatalf("delete table must be inside nft -f, not a separate call: %v", r.Calls)
+		}
+	}
+}
+
 func TestCompileIncludesEndpointInNftScript(t *testing.T) {
 	r := linux.NewRecordingRunner()
 	if _, err := apply.Reconcile(r, basePolicy()); err != nil {

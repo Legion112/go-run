@@ -80,6 +80,9 @@ func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string
 	}
 	// Simulate existing state after first successful apply
 	if r.AlreadyApplied {
+		if name == "nft" && len(args) >= 4 && args[0] == "-j" && args[1] == "list" && args[2] == "table" {
+			return sampleNftListJSON(), nil
+		}
 		if name == "nft" && len(args) >= 2 && args[0] == "list" {
 			return sampleNftList(), nil
 		}
@@ -103,7 +106,7 @@ func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string
 			return "100: from all fwmark 0x1 lookup 100", nil
 		}
 		if name == "ip" && len(args) >= 1 && args[0] == "route" {
-			return "blackhole default table 100", nil
+			return "blackhole default metric 100", nil
 		}
 	}
 	if out, ok := r.Outputs[key]; ok {
@@ -127,6 +130,19 @@ func sampleNftList() string {
     ip daddr != @ru_nets meta mark set 0x1 comment "mark-non-direct"
   }
 }`
+}
+
+func sampleNftListJSON() string {
+	return `{"nftables":[
+{"metainfo":{"version":"1"}},
+{"table":{"family":"inet","name":"gotun"}},
+{"set":{"family":"inet","name":"ru_nets","table":"gotun","type":"ipv4_addr","flags":["interval"],"elem":["10.200.0.0/24"]}},
+{"chain":{"family":"inet","table":"gotun","name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"drop-ipv6","expr":[]}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-lan","expr":[]}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"exclude-endpoint","expr":[]}},
+{"rule":{"family":"inet","table":"gotun","chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}}
+]}`
 }
 
 // WriteTempFile is a helper for backends that need a file path.

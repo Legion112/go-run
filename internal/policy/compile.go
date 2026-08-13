@@ -3,6 +3,9 @@ package policy
 import (
 	"fmt"
 	"net/netip"
+	"reflect"
+	"slices"
+	"sort"
 )
 
 // Compile turns a Policy into a declarative DesiredKernelState.
@@ -77,9 +80,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 		IPRules: []IPRuleSpec{
 			{Priority: prio, Mark: mark, Table: table},
 		},
-		Routes: []RouteSpec{
-			routeForTunnel(table, iface, p.TunnelUp, p.FailMode),
-		},
+		Routes: routesForTunnel(table, iface, p.TunnelUp, p.FailMode),
 		WireGuard: WireGuardSpec{
 			Interface:  iface,
 			PrivateKey: p.WireGuard.PrivateKey,
@@ -94,14 +95,26 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	return state, nil
 }
 
-func routeForTunnel(table int, iface string, tunnelUp bool, mode FailMode) RouteSpec {
+// routesForTunnel always installs a terminal blackhole in the owned table.
+// When the tunnel is up, a lower-metric device route is preferred; if wg0
+// disappears without a control-plane reapply, the blackhole remains and
+// marked packets cannot fall through RPDB into main.
+func routesForTunnel(table int, iface string, tunnelUp bool, mode FailMode) []RouteSpec {
 	dst := netip.MustParsePrefix("0.0.0.0/0")
-	if tunnelUp {
-		return RouteSpec{Table: table, Destination: dst, Device: iface}
+	_ = mode // v1: FailClosed only
+	bh := RouteSpec{
+		Table:       table,
+		Destination: dst,
+		Blackhole:   true,
+		Metric:      FailClosedRouteMetric,
 	}
-	// v1: FailClosed only — blackhole when tunnel is down.
-	_ = mode
-	return RouteSpec{Table: table, Destination: dst, Blackhole: true}
+	if !tunnelUp {
+		return []RouteSpec{bh}
+	}
+	return []RouteSpec{
+		{Table: table, Destination: dst, Device: iface, Metric: TunnelRouteMetric},
+		bh,
+	}
 }
 
 func validate(p Policy) error {
@@ -117,12 +130,81 @@ func validate(p Policy) error {
 }
 
 // SemanticEqual reports whether two desired states are semantically equivalent
-// (ignoring incidental ordering of identical set elements after normalize).
+// after canonicalizing incidental ordering.
 func SemanticEqual(a, b DesiredKernelState) bool {
-	return fmt.Sprintf("%#v", normalize(a)) == fmt.Sprintf("%#v", normalize(b))
+	return reflect.DeepEqual(normalize(a), normalize(b))
 }
 
 func normalize(s DesiredKernelState) DesiredKernelState {
-	// Shallow copy is enough for %#v comparison of our structs.
-	return s
+	out := DesiredKernelState{
+		Sysctls:   slices.Clone(s.Sysctls),
+		IPRules:   slices.Clone(s.IPRules),
+		Routes:    slices.Clone(s.Routes),
+		WireGuard: s.WireGuard,
+		Nft: NftSpec{
+			Family: s.Nft.Family,
+			Table:  s.Nft.Table,
+			Sets:   make([]NftSetSpec, len(s.Nft.Sets)),
+			Chains: make([]NftChainSpec, len(s.Nft.Chains)),
+		},
+	}
+	sort.Slice(out.Sysctls, func(i, j int) bool { return out.Sysctls[i].Key < out.Sysctls[j].Key })
+	sort.Slice(out.IPRules, func(i, j int) bool {
+		if out.IPRules[i].Priority != out.IPRules[j].Priority {
+			return out.IPRules[i].Priority < out.IPRules[j].Priority
+		}
+		return out.IPRules[i].Mark < out.IPRules[j].Mark
+	})
+	sort.Slice(out.Routes, func(i, j int) bool {
+		a, b := out.Routes[i], out.Routes[j]
+		if a.Table != b.Table {
+			return a.Table < b.Table
+		}
+		if a.Metric != b.Metric {
+			return a.Metric < b.Metric
+		}
+		if a.Blackhole != b.Blackhole {
+			return a.Blackhole
+		}
+		return a.Device < b.Device
+	})
+	if out.WireGuard.Peer.AllowedIPs != nil {
+		out.WireGuard.Peer.AllowedIPs = slices.Clone(s.WireGuard.Peer.AllowedIPs)
+		sort.Slice(out.WireGuard.Peer.AllowedIPs, func(i, j int) bool {
+			return out.WireGuard.Peer.AllowedIPs[i].String() < out.WireGuard.Peer.AllowedIPs[j].String()
+		})
+	}
+	for i, set := range s.Nft.Sets {
+		el := slices.Clone(set.Elements)
+		sort.Slice(el, func(a, b int) bool { return el[a].String() < el[b].String() })
+		flags := slices.Clone(set.Flags)
+		sort.Strings(flags)
+		out.Nft.Sets[i] = NftSetSpec{Name: set.Name, Type: set.Type, Flags: flags, Elements: el}
+	}
+	sort.Slice(out.Nft.Sets, func(i, j int) bool { return out.Nft.Sets[i].Name < out.Nft.Sets[j].Name })
+	for i, ch := range s.Nft.Chains {
+		rules := make([]NftRuleSpec, len(ch.Rules))
+		for j, rule := range ch.Rules {
+			rules[j] = NftRuleSpec{
+				Description:     rule.Description,
+				ExcludePrefixes: slices.Clone(rule.ExcludePrefixes),
+				ExcludeAddrs:    slices.Clone(rule.ExcludeAddrs),
+				DirectSet:       rule.DirectSet,
+				Mark:            rule.Mark,
+				DropIPv6:        rule.DropIPv6,
+			}
+			sort.Slice(rules[j].ExcludePrefixes, func(a, b int) bool {
+				return rules[j].ExcludePrefixes[a].String() < rules[j].ExcludePrefixes[b].String()
+			})
+			sort.Slice(rules[j].ExcludeAddrs, func(a, b int) bool {
+				return rules[j].ExcludeAddrs[a].String() < rules[j].ExcludeAddrs[b].String()
+			})
+		}
+		sort.Slice(rules, func(a, b int) bool { return rules[a].Description < rules[b].Description })
+		out.Nft.Chains[i] = NftChainSpec{
+			Name: ch.Name, Type: ch.Type, Hook: ch.Hook, Priority: ch.Priority, Policy: ch.Policy, Rules: rules,
+		}
+	}
+	sort.Slice(out.Nft.Chains, func(i, j int) bool { return out.Nft.Chains[i].Name < out.Nft.Chains[j].Name })
+	return out
 }

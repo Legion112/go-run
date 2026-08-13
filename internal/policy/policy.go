@@ -20,6 +20,12 @@ const (
 	DefaultRulePriority        = 100
 	DefaultTunnelIface         = "wg0"
 	RuNetsSetName              = "ru_nets"
+
+	// TunnelRouteMetric is preferred while wg0 is usable.
+	TunnelRouteMetric = 10
+	// FailClosedRouteMetric is the permanent terminal fallback in table 100.
+	// Marked packets must never fall through to main if the tunnel route disappears.
+	FailClosedRouteMetric = 100
 )
 
 // Policy is the high-level desired routing policy for the gotun gateway.
@@ -32,8 +38,10 @@ type Policy struct {
 	Table           int
 	RulePriority    int
 	FailMode        FailMode
-	// TunnelUp indicates whether the WireGuard interface is expected to carry traffic.
-	// When false and FailMode is FailClosed, table routes use blackhole.
+	// TunnelUp indicates whether the WireGuard interface should carry traffic.
+	// When true, table 100 prefers default via the tunnel device; a higher-metric
+	// blackhole always remains so an unexpected wg0 loss cannot fall through to main.
+	// When false, only the blackhole is installed.
 	TunnelUp bool
 	// WireGuard holds keys/peers when apply manages the interface.
 	WireGuard WireGuardConfig
@@ -125,6 +133,7 @@ type RouteSpec struct {
 	// Blackhole when true installs an unreachable/blackhole default (fail-closed).
 	Blackhole bool
 	Device    string // e.g. wg0 when tunnel is up
+	Metric    int    // lower wins; 0 means kernel default
 }
 
 // WireGuardSpec is declarative WG interface state.
