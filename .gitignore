@@ -1,0 +1,5 @@
+/bin/
+/prefixes.txt
+*.key
+.idea/
+data/geo/*.mmdb

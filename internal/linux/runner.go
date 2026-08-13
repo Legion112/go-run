@@ -1,0 +1,144 @@
+package linux
+
+import (
+	"bytes"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// Runner executes external commands (nft, ip, sysctl, wg).
+type Runner interface {
+	Run(name string, args ...string) (stdout string, err error)
+	RunWithInput(name string, stdin string, args ...string) (stdout string, err error)
+}
+
+// ExecRunner runs real commands on the host/netns.
+type ExecRunner struct{}
+
+func (ExecRunner) Run(name string, args ...string) (string, error) {
+	return ExecRunner{}.RunWithInput(name, "", args...)
+}
+
+func (ExecRunner) RunWithInput(name string, stdin string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	err := cmd.Run()
+	if err != nil {
+		return stdout.String(), fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
+// RecordingRunner records commands and can return scripted results.
+type RecordingRunner struct {
+	Calls     []string
+	Outputs   map[string]string
+	Errors    map[string]error
+	FailOn    string
+	CallCount int
+	// SemanticApplied tracks whether a full desired state was already applied (for idempotency tests).
+	AlreadyApplied bool
+}
+
+func NewRecordingRunner() *RecordingRunner {
+	return &RecordingRunner{
+		Outputs: map[string]string{},
+		Errors:  map[string]error{},
+	}
+}
+
+func (r *RecordingRunner) key(name string, args []string) string {
+	return name + " " + strings.Join(args, " ")
+}
+
+func (r *RecordingRunner) Run(name string, args ...string) (string, error) {
+	return r.RunWithInput(name, "", args...)
+}
+
+func (r *RecordingRunner) RunWithInput(name string, stdin string, args ...string) (string, error) {
+	key := r.key(name, args)
+	if stdin != "" {
+		key += " <<STDIN>>"
+	}
+	r.Calls = append(r.Calls, key)
+	if stdin != "" {
+		r.Calls = append(r.Calls, "STDIN:"+stdin)
+	}
+	r.CallCount++
+	if r.FailOn != "" && strings.Contains(key, r.FailOn) {
+		return "", fmt.Errorf("injected failure: %s", key)
+	}
+	if err, ok := r.Errors[key]; ok {
+		return r.Outputs[key], err
+	}
+	// Simulate existing state after first successful apply
+	if r.AlreadyApplied {
+		if name == "nft" && len(args) >= 2 && args[0] == "list" {
+			return sampleNftList(), nil
+		}
+		if name == "bash" && len(args) >= 2 && args[0] == "-c" {
+			cmd := args[1]
+			if strings.Contains(cmd, "cat /proc/sys/net/ipv4/ip_forward") ||
+				strings.Contains(cmd, "cat /proc/sys/net/ipv6/conf/all/disable_ipv6") ||
+				strings.Contains(cmd, "cat /proc/sys/net/ipv6/conf/default/disable_ipv6") {
+				return "1", nil
+			}
+		}
+		if name == "sysctl" && len(args) >= 2 && args[0] == "-n" {
+			switch args[1] {
+			case "net.ipv4.ip_forward":
+				return "1", nil
+			case "net.ipv6.conf.all.disable_ipv6", "net.ipv6.conf.default.disable_ipv6":
+				return "1", nil
+			}
+		}
+		if name == "ip" && len(args) >= 1 && args[0] == "rule" {
+			return "100: from all fwmark 0x1 lookup 100", nil
+		}
+		if name == "ip" && len(args) >= 1 && args[0] == "route" {
+			return "blackhole default table 100", nil
+		}
+	}
+	if out, ok := r.Outputs[key]; ok {
+		return out, nil
+	}
+	return "", nil
+}
+
+func sampleNftList() string {
+	return `table inet gotun {
+  set ru_nets {
+    type ipv4_addr
+    flags interval
+    elements = { 10.200.0.0/24 }
+  }
+  chain prerouting {
+    type filter hook prerouting priority -150; policy accept;
+    meta nfproto ipv6 drop comment "drop-ipv6"
+    ip daddr 10.10.0.0/24 return comment "exclude-lan"
+    ip daddr 10.10.0.2 return comment "exclude-endpoint"
+    ip daddr != @ru_nets meta mark set 0x1 comment "mark-non-direct"
+  }
+}`
+}
+
+// WriteTempFile is a helper for backends that need a file path.
+func WriteTempFile(pattern, content string) (string, error) {
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(content); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}

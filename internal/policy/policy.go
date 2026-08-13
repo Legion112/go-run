@@ -1,0 +1,139 @@
+package policy
+
+import "net/netip"
+
+// FailMode controls non-RU behavior when the tunnel is unavailable.
+type FailMode int
+
+const (
+	// FailClosed blackholes marked (non-RU) traffic when the tunnel is down.
+	FailClosed FailMode = iota
+)
+
+const (
+	// OwnedNftTable is the nftables table owned exclusively by gotun.
+	OwnedNftTable  = "gotun"
+	OwnedNftFamily = "inet"
+
+	DefaultMark         uint32 = 0x1
+	DefaultTableID             = 100
+	DefaultRulePriority        = 100
+	DefaultTunnelIface         = "wg0"
+	RuNetsSetName              = "ru_nets"
+)
+
+// Policy is the high-level desired routing policy for the gotun gateway.
+type Policy struct {
+	DirectPrefixes  []netip.Prefix // RU (or other "direct") CIDRs
+	TunnelInterface string
+	TunnelEndpoint  netip.Addr
+	LANs            []netip.Prefix
+	Mark            uint32
+	Table           int
+	RulePriority    int
+	FailMode        FailMode
+	// TunnelUp indicates whether the WireGuard interface is expected to carry traffic.
+	// When false and FailMode is FailClosed, table routes use blackhole.
+	TunnelUp bool
+	// WireGuard holds keys/peers when apply manages the interface.
+	WireGuard WireGuardConfig
+}
+
+// WireGuardConfig is declarative WG desired state attached to Policy.
+type WireGuardConfig struct {
+	PrivateKey string
+	ListenPort int
+	Address    netip.Prefix // tunnel address on wg0
+	Peer       WireGuardPeer
+}
+
+// WireGuardPeer describes the exit hop.
+type WireGuardPeer struct {
+	PublicKey           string
+	Endpoint            string // host:port
+	AllowedIPs          []netip.Prefix
+	PersistentKeepalive int
+}
+
+// DesiredKernelState is fully declarative: what should exist, not how to apply it.
+type DesiredKernelState struct {
+	Sysctls   []SysctlSpec
+	Nft       NftSpec
+	IPRules   []IPRuleSpec
+	Routes    []RouteSpec
+	WireGuard WireGuardSpec
+}
+
+// SysctlSpec is a desired sysctl key/value.
+type SysctlSpec struct {
+	Key   string
+	Value string
+}
+
+// NftSpec describes owned nftables objects under inet gotun.
+type NftSpec struct {
+	Family string
+	Table  string
+	Sets   []NftSetSpec
+	Chains []NftChainSpec
+}
+
+// NftSetSpec is a named set of IPv4 prefixes (interval).
+type NftSetSpec struct {
+	Name     string
+	Type     string // "ipv4_addr"
+	Flags    []string
+	Elements []netip.Prefix
+}
+
+// NftChainSpec is a chain with declarative rules.
+type NftChainSpec struct {
+	Name     string
+	Type     string // "filter"
+	Hook     string // "prerouting", "forward", ...
+	Priority int
+	Policy   string // "accept"
+	Rules    []NftRuleSpec
+}
+
+// NftRuleSpec is a semantic rule (not nft handle numbers).
+type NftRuleSpec struct {
+	// Description is a stable id for semantic comparison.
+	Description string
+	// MatchExcludes: if dst is in any of these prefixes or equals Endpoint, skip mark.
+	ExcludePrefixes []netip.Prefix
+	ExcludeAddrs    []netip.Addr
+	// DirectSet: if dst is in this set, do not mark (go direct).
+	DirectSet string
+	// Mark value to set when dst is not in DirectSet and not excluded.
+	Mark uint32
+	// DropIPv6 when true adds an ip6 drop rule in this chain context.
+	DropIPv6 bool
+}
+
+// IPRuleSpec is a policy routing rule owned by gotun.
+type IPRuleSpec struct {
+	Priority int
+	Mark     uint32
+	Table    int
+}
+
+// RouteSpec is a route in a specific table.
+type RouteSpec struct {
+	Table       int
+	Destination netip.Prefix // default = 0.0.0.0/0
+	// Blackhole when true installs an unreachable/blackhole default (fail-closed).
+	Blackhole bool
+	Device    string // e.g. wg0 when tunnel is up
+}
+
+// WireGuardSpec is declarative WG interface state.
+type WireGuardSpec struct {
+	Interface  string
+	PrivateKey string
+	ListenPort int
+	Address    netip.Prefix
+	Peer       WireGuardPeer
+	Managed    bool // if false, apply only assumes iface exists for routing
+	Up         bool // desired admin state; false => fail-closed (iface down, no AllowedIPs routes)
+}
