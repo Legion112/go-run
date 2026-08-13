@@ -19,7 +19,9 @@ const (
 	DefaultTableID             = 100
 	DefaultRulePriority        = 100
 	DefaultTunnelIface         = "wg0"
+	DefaultClientsIface        = "wg-clients"
 	RuNetsSetName              = "ru_nets"
+	HomeNetsSetName            = "home_nets"
 
 	// TunnelRouteMetric is preferred while wg0 is usable.
 	TunnelRouteMetric = 10
@@ -43,8 +45,11 @@ type Policy struct {
 	// blackhole always remains so an unexpected wg0 loss cannot fall through to main.
 	// When false, only the blackhole is installed.
 	TunnelUp bool
-	// WireGuard holds keys/peers when apply manages the interface.
+	// WireGuard holds keys/peers when apply manages the exit interface.
 	WireGuard WireGuardConfig
+	// InboundWireGuard is the clients-facing listen interface (WAN peers via port-forward).
+	// When set (PrivateKey non-empty), compile installs home_nets forward isolation.
+	InboundWireGuard WireGuardConfig
 }
 
 // WireGuardConfig is declarative WG desired state attached to Policy.
@@ -65,11 +70,12 @@ type WireGuardPeer struct {
 
 // DesiredKernelState is fully declarative: what should exist, not how to apply it.
 type DesiredKernelState struct {
-	Sysctls   []SysctlSpec
-	Nft       NftSpec
-	IPRules   []IPRuleSpec
-	Routes    []RouteSpec
-	WireGuard WireGuardSpec
+	Sysctls          []SysctlSpec
+	Nft              NftSpec
+	IPRules          []IPRuleSpec
+	Routes           []RouteSpec
+	WireGuard        WireGuardSpec // exit hop (wg0)
+	WireGuardClients WireGuardSpec // inbound clients (wg-clients); Managed=false if unused
 }
 
 // SysctlSpec is a desired sysctl key/value.
@@ -117,6 +123,9 @@ type NftRuleSpec struct {
 	Mark uint32
 	// DropIPv6 when true adds an ip6 drop rule in this chain context.
 	DropIPv6 bool
+	// IIfName + DropDstSet: drop forwarded packets from iface to destinations in set.
+	IIfName    string
+	DropDstSet string
 }
 
 // IPRuleSpec is a policy routing rule owned by gotun.

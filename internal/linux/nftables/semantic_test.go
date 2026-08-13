@@ -108,3 +108,72 @@ func TestSemanticMatchJSON_DifferentLANDoesNotMatch(t *testing.T) {
 		t.Fatal("different exclude-lan prefix must not match")
 	}
 }
+
+func TestSemanticMatchJSON_IsolateHome(t *testing.T) {
+	spec := policy.NftSpec{
+		Family: "inet",
+		Table:  "gotun",
+		Sets: []policy.NftSetSpec{
+			{Name: "ru_nets", Type: "ipv4_addr", Elements: []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")}},
+			{Name: "home_nets", Type: "ipv4_addr", Elements: []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")}},
+		},
+		Chains: []policy.NftChainSpec{
+			{
+				Name: "prerouting", Type: "filter", Hook: "prerouting", Priority: -150, Policy: "accept",
+				Rules: []policy.NftRuleSpec{
+					{Description: "drop-ipv6", DropIPv6: true},
+					{
+						Description:     "mark-non-direct",
+						ExcludePrefixes: []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
+						ExcludeAddrs:    []netip.Addr{netip.MustParseAddr("10.10.0.2")},
+						DirectSet:       "ru_nets",
+						Mark:            1,
+					},
+				},
+			},
+			{
+				Name: "forward", Type: "filter", Hook: "forward", Priority: 0, Policy: "accept",
+				Rules: []policy.NftRuleSpec{{
+					Description: "isolate-inbound-from-home",
+					IIfName:     "wg-clients",
+					DropDstSet:  "home_nets",
+				}},
+			},
+		},
+	}
+	good := `{"nftables":[
+{"set":{"name":"ru_nets","elem":["10.200.0.0/24"]}},
+{"set":{"name":"home_nets","elem":["10.10.0.0/24"]}},
+{"chain":{"name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
+{"chain":{"name":"forward","type":"filter","hook":"forward","prio":0,"policy":"accept"}},
+{"rule":{"chain":"prerouting","comment":"drop-ipv6","expr":[]}},
+{"rule":{"chain":"prerouting","comment":"exclude-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
+{"rule":{"chain":"prerouting","comment":"exclude-endpoint","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"10.10.0.2"}}]}},
+{"rule":{"chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}},
+{"rule":{"chain":"forward","comment":"isolate-inbound-from-home","expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"wg-clients"}},
+  {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"set":"home_nets"}}}
+]}}
+]}`
+	if !semanticMatchJSON(good, spec) {
+		t.Fatal("expected isolate rule to match")
+	}
+
+	wrongHome := `{"nftables":[
+{"set":{"name":"ru_nets","elem":["10.200.0.0/24"]}},
+{"set":{"name":"home_nets","elem":["10.11.0.0/24"]}},
+{"chain":{"name":"prerouting","type":"filter","hook":"prerouting","prio":-150,"policy":"accept"}},
+{"chain":{"name":"forward","type":"filter","hook":"forward","prio":0,"policy":"accept"}},
+{"rule":{"chain":"prerouting","comment":"drop-ipv6","expr":[]}},
+{"rule":{"chain":"prerouting","comment":"exclude-lan","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"prefix":{"addr":"10.10.0.0","len":24}}}}]}},
+{"rule":{"chain":"prerouting","comment":"exclude-endpoint","expr":[{"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":"10.10.0.2"}}]}},
+{"rule":{"chain":"prerouting","comment":"mark-non-direct","expr":[{"mangle":{"key":{"meta":{"key":"mark"}},"value":1}}]}},
+{"rule":{"chain":"forward","comment":"isolate-inbound-from-home","expr":[
+  {"match":{"op":"==","left":{"meta":{"key":"iifname"}},"right":"wg-clients"}},
+  {"match":{"op":"==","left":{"payload":{"protocol":"ip","field":"daddr"}},"right":{"set":"home_nets"}}}
+]}}
+]}`
+	if semanticMatchJSON(wrongHome, spec) {
+		t.Fatal("wrong home_nets elements must not match")
+	}
+}

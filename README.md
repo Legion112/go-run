@@ -87,7 +87,7 @@ No IPv6 split routing. Lab and apply disable/drop IPv6 so it cannot bypass polic
 
 ## Lab topology
 
-Containers: `client`, `gotun`, `exit`, `ru-dest`, `foreign-dest`.
+Outbound split lab containers: `client`, `gotun`, `exit`, `ru-dest`, `foreign-dest`.
 
 | Path | Expected |
 |------|----------|
@@ -95,6 +95,28 @@ Containers: `client`, `gotun`, `exit`, `ru-dest`, `foreign-dest`.
 | client → foreign IP | via gotun wg0 → exit |
 | WG down (no reapply) | foreign fails; RU works |
 | endpoint IP | not via wg0 |
+
+## LAN / Pi deployment
+
+Typical home install: Pi on the LAN; router port-forwards **only** the inbound clients WireGuard UDP port to the Pi; your PC uses the Pi’s **LAN IP** as gateway (not the public IP).
+
+Invariants (proven by `TestLANDeploy_PortForwardHomeIsolation`):
+
+1. WAN peers reach gotun only via the forwarded WG port.
+2. Home devices use gotun’s LAN address directly.
+3. Tunneled WAN peers cannot reach home-LAN destinations (`iifname "wg-clients" ip daddr @home_nets drop` in `inet gotun`).
+
+Apply with a second config for the clients listen interface:
+
+```bash
+gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
+  -lan 192.168.1.0/24 \
+  -wg-config wg0.conf \
+  -wg-clients-config wg-clients.conf \
+  -tunnel-up true
+```
+
+`-lan` feeds both mark exclusions and the `home_nets` isolation set.
 
 ## Build & test
 
@@ -116,9 +138,9 @@ CLI:
 gotun fetch -mmdb data/geo/GeoIP2-City.mmdb -out prefixes.txt -country RU
 gotun fetch -out prefixes.txt -country RU   # CSV download; needs MAXMIND_LICENSE_KEY
 gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg0.conf -tunnel-up true
+gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
 gotun clear
 ```
-
 ## Out of scope (v1)
 
 - Userspace SOCKS/proxy

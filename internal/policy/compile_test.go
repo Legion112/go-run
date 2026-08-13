@@ -141,3 +141,53 @@ func TestSemanticEqual_SamePolicy(t *testing.T) {
 		t.Fatal("expected semantic equal")
 	}
 }
+
+func TestCompile_InboundIsolatesHomeNets(t *testing.T) {
+	p := testPolicy(true)
+	p.InboundWireGuard = policy.WireGuardConfig{
+		PrivateKey: "CLIENTPRIV",
+		ListenPort: 51821,
+		Address:    netip.MustParsePrefix("10.98.0.1/30"),
+		Peer: policy.WireGuardPeer{
+			PublicKey:  "WANPEER",
+			AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.98.0.2/32")},
+		},
+	}
+	st, err := policy.Compile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.WireGuardClients.Managed || st.WireGuardClients.Interface != policy.DefaultClientsIface {
+		t.Fatalf("clients wg: %+v", st.WireGuardClients)
+	}
+	var haveHome, haveIsolate bool
+	for _, set := range st.Nft.Sets {
+		if set.Name == policy.HomeNetsSetName && len(set.Elements) == 1 {
+			haveHome = true
+		}
+	}
+	for _, ch := range st.Nft.Chains {
+		if ch.Hook != "forward" {
+			continue
+		}
+		for _, r := range ch.Rules {
+			if r.Description == "isolate-inbound-from-home" &&
+				r.IIfName == policy.DefaultClientsIface &&
+				r.DropDstSet == policy.HomeNetsSetName {
+				haveIsolate = true
+			}
+		}
+	}
+	if !haveHome || !haveIsolate {
+		t.Fatalf("want home_nets + isolate rule, sets=%+v chains=%+v", st.Nft.Sets, st.Nft.Chains)
+	}
+}
+
+func TestCompile_InboundRequiresLANs(t *testing.T) {
+	p := testPolicy(true)
+	p.LANs = nil
+	p.InboundWireGuard = policy.WireGuardConfig{PrivateKey: "x"}
+	if _, err := policy.Compile(p); err == nil {
+		t.Fatal("expected error when inbound WG without LANs")
+	}
+}

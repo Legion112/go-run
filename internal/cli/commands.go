@@ -26,7 +26,7 @@ func FetchMaxMind(license, country, out string) error {
 }
 
 // Apply loads prefixes and reconciles kernel state.
-func Apply(prefixesPath, endpoint, wgConfig, lanCSV string, tunnelUp bool) error {
+func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tunnelUp bool) error {
 	if prefixesPath == "" {
 		return fmt.Errorf("-prefixes is required")
 	}
@@ -85,9 +85,13 @@ func Apply(prefixesPath, endpoint, wgConfig, lanCSV string, tunnelUp bool) error
 			return err
 		}
 		p.WireGuard = cfg
-		if cfg.Peer.Endpoint != "" {
-			// keep TunnelEndpoint as underlay IP from -endpoint
+	}
+	if wgClientsConfig != "" {
+		cfg, err := loadWGQuick(wgClientsConfig)
+		if err != nil {
+			return err
 		}
+		p.InboundWireGuard = cfg
 	}
 
 	res, err := apply.Reconcile(linux.ExecRunner{}, p)

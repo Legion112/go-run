@@ -46,6 +46,12 @@ func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 		return Result{Changes: total, State: st}, fmt.Errorf("wireguard: %w", err)
 	}
 
+	c, err = wireguard.Reconcile(r, st.WireGuardClients)
+	total += c
+	if err != nil {
+		return Result{Changes: total, State: st}, fmt.Errorf("wireguard-clients: %w", err)
+	}
+
 	c, err = routing.Reconcile(r, st.IPRules, st.Routes)
 	total += c
 	if err != nil {
@@ -58,6 +64,7 @@ func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 // Clear removes gotun-owned kernel objects.
 func Clear(r linux.Runner) error {
 	_ = wireguard.Clear(r, policy.DefaultTunnelIface)
+	_ = wireguard.Clear(r, policy.DefaultClientsIface)
 	_ = routing.Clear(r, policy.DefaultRulePriority, policy.DefaultTableID)
 	_ = nftables.Clear(r, policy.OwnedNftFamily, policy.OwnedNftTable)
 	return nil

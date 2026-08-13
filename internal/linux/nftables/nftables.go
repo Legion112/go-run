@@ -58,6 +58,10 @@ type liveRule struct {
 	Mark    *uint32
 	// DAddrs are ip daddr match targets (addr or addr/len), normalized as strings.
 	DAddrs []string
+	// IIfNames from meta iifname matches.
+	IIfNames []string
+	// SetNames referenced in daddr set lookups (@home_nets).
+	SetNames []string
 }
 
 func semanticMatchJSON(out string, spec policy.NftSpec) bool {
@@ -128,9 +132,32 @@ func liveHasRule(rules []liveRule, chain string, want policy.NftRuleSpec) bool {
 			}
 		}
 		return false
+	case want.Description == "isolate-inbound-from-home":
+		for _, r := range rules {
+			if r.Chain != chain || r.Comment != "isolate-inbound-from-home" {
+				continue
+			}
+			if want.IIfName != "" && !containsStr(r.IIfNames, want.IIfName) {
+				return false
+			}
+			if want.DropDstSet != "" && !containsStr(r.SetNames, want.DropDstSet) {
+				return false
+			}
+			return true
+		}
+		return false
 	default:
 		return countComments(rules, chain, want.Description) >= 1
 	}
+}
+
+func containsStr(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func countComments(rules []liveRule, chain, comment string) int {
@@ -288,6 +315,8 @@ func parseRuleJSON(raw json.RawMessage) (liveRule, bool) {
 		r.Mark = &m
 	}
 	r.DAddrs = findDAddrsInExpr(rule.Expr)
+	r.IIfNames = findIIfNamesInExpr(rule.Expr)
+	r.SetNames = findSetNamesInExpr(rule.Expr)
 	return r, rule.Chain != ""
 }
 
@@ -412,6 +441,114 @@ func matchRightToString(right json.RawMessage) (string, bool) {
 	return "", false
 }
 
+func findIIfNamesInExpr(exprs []json.RawMessage) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	var walk func([]json.RawMessage)
+	walk = func(exprs []json.RawMessage) {
+		for _, raw := range exprs {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				continue
+			}
+			if mraw, ok := obj["match"]; ok {
+				if name, ok := iifNameFromMatch(mraw); ok {
+					if _, dup := seen[name]; !dup {
+						seen[name] = struct{}{}
+						out = append(out, name)
+					}
+				}
+			}
+			for _, v := range obj {
+				var nested []json.RawMessage
+				if json.Unmarshal(v, &nested) == nil {
+					walk(nested)
+				}
+			}
+		}
+	}
+	walk(exprs)
+	return out
+}
+
+func iifNameFromMatch(mraw json.RawMessage) (string, bool) {
+	var m struct {
+		Left  json.RawMessage `json:"left"`
+		Right json.RawMessage `json:"right"`
+	}
+	if err := json.Unmarshal(mraw, &m); err != nil {
+		return "", false
+	}
+	var metaWrap struct {
+		Meta struct {
+			Key string `json:"key"`
+		} `json:"meta"`
+	}
+	if json.Unmarshal(m.Left, &metaWrap) != nil || metaWrap.Meta.Key != "iifname" {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(m.Right, &s) == nil && s != "" {
+		return s, true
+	}
+	return "", false
+}
+
+func findSetNamesInExpr(exprs []json.RawMessage) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	var walk func([]json.RawMessage)
+	walk = func(exprs []json.RawMessage) {
+		for _, raw := range exprs {
+			var obj map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &obj); err != nil {
+				continue
+			}
+			if mraw, ok := obj["match"]; ok {
+				if name, ok := setNameFromMatch(mraw); ok {
+					if _, dup := seen[name]; !dup {
+						seen[name] = struct{}{}
+						out = append(out, name)
+					}
+				}
+			}
+			for _, v := range obj {
+				var nested []json.RawMessage
+				if json.Unmarshal(v, &nested) == nil {
+					walk(nested)
+				}
+			}
+		}
+	}
+	walk(exprs)
+	return out
+}
+
+func setNameFromMatch(mraw json.RawMessage) (string, bool) {
+	var m struct {
+		Right json.RawMessage `json:"right"`
+	}
+	if err := json.Unmarshal(mraw, &m); err != nil {
+		return "", false
+	}
+	var setWrap struct {
+		Set string `json:"set"`
+	}
+	if json.Unmarshal(m.Right, &setWrap) == nil && setWrap.Set != "" {
+		return setWrap.Set, true
+	}
+	// Some nft versions: {"right":{"set":{"name":"home_nets"}}}
+	var nested struct {
+		Set struct {
+			Name string `json:"name"`
+		} `json:"set"`
+	}
+	if json.Unmarshal(m.Right, &nested) == nil && nested.Set.Name != "" {
+		return nested.Set.Name, true
+	}
+	return "", false
+}
+
 func parseJSONUint32(raw json.RawMessage) (uint32, bool) {
 	var n uint32
 	if err := json.Unmarshal(raw, &n); err == nil {
@@ -480,6 +617,8 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "exclude-endpoint"`, a.String()))
 			}
 			lines = append(lines, fmt.Sprintf(`ip daddr != @%s meta mark set 0x%x comment "mark-non-direct"`, rule.DirectSet, rule.Mark))
+		case rule.Description == "isolate-inbound-from-home":
+			lines = append(lines, fmt.Sprintf(`iifname "%s" ip daddr @%s drop comment "isolate-inbound-from-home"`, rule.IIfName, rule.DropDstSet))
 		}
 	}
 	return lines

@@ -30,11 +30,67 @@ func Compile(p Policy) (DesiredKernelState, error) {
 	if iface == "" {
 		iface = DefaultTunnelIface
 	}
+	clientsIface := DefaultClientsIface
 
 	excludes := append([]netip.Prefix(nil), p.LANs...)
 	excludeAddrs := []netip.Addr{}
 	if p.TunnelEndpoint.IsValid() {
 		excludeAddrs = append(excludeAddrs, p.TunnelEndpoint)
+	}
+
+	sets := []NftSetSpec{
+		{
+			Name:     RuNetsSetName,
+			Type:     "ipv4_addr",
+			Flags:    []string{"interval"},
+			Elements: append([]netip.Prefix(nil), p.DirectPrefixes...),
+		},
+	}
+	chains := []NftChainSpec{
+		{
+			Name:     "prerouting",
+			Type:     "filter",
+			Hook:     "prerouting",
+			Priority: -150, // mangle-like
+			Policy:   "accept",
+			Rules: []NftRuleSpec{
+				{
+					Description: "drop-ipv6",
+					DropIPv6:    true,
+				},
+				{
+					Description:     "mark-non-direct",
+					ExcludePrefixes: excludes,
+					ExcludeAddrs:    excludeAddrs,
+					DirectSet:       RuNetsSetName,
+					Mark:            mark,
+				},
+			},
+		},
+	}
+
+	inboundManaged := p.InboundWireGuard.PrivateKey != ""
+	if inboundManaged {
+		sets = append(sets, NftSetSpec{
+			Name:     HomeNetsSetName,
+			Type:     "ipv4_addr",
+			Flags:    []string{"interval"},
+			Elements: append([]netip.Prefix(nil), p.LANs...),
+		})
+		chains = append(chains, NftChainSpec{
+			Name:     "forward",
+			Type:     "filter",
+			Hook:     "forward",
+			Priority: 0,
+			Policy:   "accept",
+			Rules: []NftRuleSpec{
+				{
+					Description: "isolate-inbound-from-home",
+					IIfName:     clientsIface,
+					DropDstSet:  HomeNetsSetName,
+				},
+			},
+		})
 	}
 
 	state := DesiredKernelState{
@@ -46,36 +102,8 @@ func Compile(p Policy) (DesiredKernelState, error) {
 		Nft: NftSpec{
 			Family: OwnedNftFamily,
 			Table:  OwnedNftTable,
-			Sets: []NftSetSpec{
-				{
-					Name:     RuNetsSetName,
-					Type:     "ipv4_addr",
-					Flags:    []string{"interval"},
-					Elements: append([]netip.Prefix(nil), p.DirectPrefixes...),
-				},
-			},
-			Chains: []NftChainSpec{
-				{
-					Name:     "prerouting",
-					Type:     "filter",
-					Hook:     "prerouting",
-					Priority: -150, // mangle-like
-					Policy:   "accept",
-					Rules: []NftRuleSpec{
-						{
-							Description: "drop-ipv6",
-							DropIPv6:    true,
-						},
-						{
-							Description:     "mark-non-direct",
-							ExcludePrefixes: excludes,
-							ExcludeAddrs:    excludeAddrs,
-							DirectSet:       RuNetsSetName,
-							Mark:            mark,
-						},
-					},
-				},
-			},
+			Sets:   sets,
+			Chains: chains,
 		},
 		IPRules: []IPRuleSpec{
 			{Priority: prio, Mark: mark, Table: table},
@@ -89,6 +117,15 @@ func Compile(p Policy) (DesiredKernelState, error) {
 			Peer:       p.WireGuard.Peer,
 			Managed:    p.WireGuard.PrivateKey != "",
 			Up:         p.TunnelUp,
+		},
+		WireGuardClients: WireGuardSpec{
+			Interface:  clientsIface,
+			PrivateKey: p.InboundWireGuard.PrivateKey,
+			ListenPort: p.InboundWireGuard.ListenPort,
+			Address:    p.InboundWireGuard.Address,
+			Peer:       p.InboundWireGuard.Peer,
+			Managed:    inboundManaged,
+			Up:         inboundManaged, // listen iface stays up whenever managed
 		},
 	}
 
@@ -126,6 +163,9 @@ func validate(p Policy) error {
 			return fmt.Errorf("policy: invalid or IPv6 DirectPrefix %v", pref)
 		}
 	}
+	if p.InboundWireGuard.PrivateKey != "" && len(p.LANs) == 0 {
+		return fmt.Errorf("policy: LANs required when InboundWireGuard is set (home isolation)")
+	}
 	return nil
 }
 
@@ -137,10 +177,11 @@ func SemanticEqual(a, b DesiredKernelState) bool {
 
 func normalize(s DesiredKernelState) DesiredKernelState {
 	out := DesiredKernelState{
-		Sysctls:   slices.Clone(s.Sysctls),
-		IPRules:   slices.Clone(s.IPRules),
-		Routes:    slices.Clone(s.Routes),
-		WireGuard: s.WireGuard,
+		Sysctls:          slices.Clone(s.Sysctls),
+		IPRules:          slices.Clone(s.IPRules),
+		Routes:           slices.Clone(s.Routes),
+		WireGuard:        s.WireGuard,
+		WireGuardClients: s.WireGuardClients,
 		Nft: NftSpec{
 			Family: s.Nft.Family,
 			Table:  s.Nft.Table,
@@ -168,12 +209,8 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 		}
 		return a.Device < b.Device
 	})
-	if out.WireGuard.Peer.AllowedIPs != nil {
-		out.WireGuard.Peer.AllowedIPs = slices.Clone(s.WireGuard.Peer.AllowedIPs)
-		sort.Slice(out.WireGuard.Peer.AllowedIPs, func(i, j int) bool {
-			return out.WireGuard.Peer.AllowedIPs[i].String() < out.WireGuard.Peer.AllowedIPs[j].String()
-		})
-	}
+	normalizeWGPeer(&out.WireGuard)
+	normalizeWGPeer(&out.WireGuardClients)
 	for i, set := range s.Nft.Sets {
 		el := slices.Clone(set.Elements)
 		sort.Slice(el, func(a, b int) bool { return el[a].String() < el[b].String() })
@@ -192,6 +229,8 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 				DirectSet:       rule.DirectSet,
 				Mark:            rule.Mark,
 				DropIPv6:        rule.DropIPv6,
+				IIfName:         rule.IIfName,
+				DropDstSet:      rule.DropDstSet,
 			}
 			sort.Slice(rules[j].ExcludePrefixes, func(a, b int) bool {
 				return rules[j].ExcludePrefixes[a].String() < rules[j].ExcludePrefixes[b].String()
@@ -207,4 +246,14 @@ func normalize(s DesiredKernelState) DesiredKernelState {
 	}
 	sort.Slice(out.Nft.Chains, func(i, j int) bool { return out.Nft.Chains[i].Name < out.Nft.Chains[j].Name })
 	return out
+}
+
+func normalizeWGPeer(wg *WireGuardSpec) {
+	if wg.Peer.AllowedIPs == nil {
+		return
+	}
+	wg.Peer.AllowedIPs = slices.Clone(wg.Peer.AllowedIPs)
+	sort.Slice(wg.Peer.AllowedIPs, func(i, j int) bool {
+		return wg.Peer.AllowedIPs[i].String() < wg.Peer.AllowedIPs[j].String()
+	})
 }

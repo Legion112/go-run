@@ -40,14 +40,15 @@ func runApply(args []string) error {
 	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	prefixesPath := fs.String("prefixes", "", "path to CIDR list (one per line) or MaxMind-shaped fixture dir")
 	endpoint := fs.String("endpoint", "", "WireGuard peer endpoint IP (underlay)")
-	wgConf := fs.String("wg-config", "", "optional path to wg-quick style config")
+	wgConf := fs.String("wg-config", "", "optional path to wg-quick style config (exit hop)")
+	wgClients := fs.String("wg-clients-config", "", "optional path to wg-quick style config (inbound clients iface)")
 	tunnelUp := fs.String("tunnel-up", "true", "whether tunnel should carry traffic (true|false)")
-	lan := fs.String("lan", "", "LAN CIDR to exclude from marking (comma-separated)")
+	lan := fs.String("lan", "", "LAN CIDR to exclude from marking and for home isolation (comma-separated)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	up := strings.EqualFold(*tunnelUp, "true") || *tunnelUp == "1"
-	return Apply(*prefixesPath, *endpoint, *wgConf, *lan, up)
+	return Apply(*prefixesPath, *endpoint, *wgConf, *wgClients, *lan, up)
 }
 
 func runClear(args []string) error {
