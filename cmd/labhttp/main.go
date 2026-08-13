@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 )
@@ -24,6 +25,14 @@ func main() {
 	}
 	mux.HandleFunc("/", h)
 	mux.HandleFunc("/id", h)
+	mux.HandleFunc("/peer", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			host = r.RemoteAddr
+		}
+		_, _ = w.Write([]byte(host))
+	})
 
 	log.Printf("labhttp listening on %s body=%q", *listen, *body)
 	if err := http.ListenAndServe(*listen, mux); err != nil {

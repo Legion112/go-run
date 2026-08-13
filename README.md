@@ -118,6 +118,21 @@ gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
 
 `-lan` feeds both mark exclusions and the `home_nets` isolation set.
 
+## Deployment topology (high fidelity)
+
+Integration hierarchy:
+
+```text
+topology_test.go       → kernel/policy correctness (fast)
+lan_deploy_test.go     → home-router port-forward + LAN isolation
+deploy_topo_test.go    → RU vs external Internet, egress identity
+```
+
+`TestDeployTopo_EgressIdentity` places the Pi **only** on home LAN. A remote client on RU Internet reaches the Pi via home-router DNAT. The physical RU↔external uplink remains; the test proves path choice by **source identity** at destinations (`labhttp` `GET /peer` from `RemoteAddr`):
+
+- RU destination sees **home-router WAN**
+- non-RU destination sees **remote-hop**
+
 ## Build & test
 
 Requires Go **1.26+**. Integration and large-set tests talk to the Docker **daemon** via the Engine API (socket / `DOCKER_HOST`); the `docker` CLI is only needed for `make docker-build`.

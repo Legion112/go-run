@@ -614,7 +614,7 @@ func renderRuleLines(chain policy.NftChainSpec) []string {
 				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "exclude-lan"`, p.String()))
 			}
 			for _, a := range rule.ExcludeAddrs {
-				lines = append(lines, fmt.Sprintf(`ip daddr %s return comment "exclude-endpoint"`, a.String()))
+				lines = append(lines, fmt.Sprintf(`ip daddr %s counter return comment "exclude-endpoint"`, a.String()))
 			}
 			lines = append(lines, fmt.Sprintf(`ip daddr != @%s meta mark set 0x%x comment "mark-non-direct"`, rule.DirectSet, rule.Mark))
 		case rule.Description == "isolate-inbound-from-home":
