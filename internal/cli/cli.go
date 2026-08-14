@@ -10,11 +10,13 @@ import (
 // Run dispatches gotun subcommands.
 func Run(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: gotun <fetch|apply|clear>")
+		return fmt.Errorf("usage: gotun <fetch|amnezia|apply|clear>")
 	}
 	switch args[0] {
 	case "fetch":
 		return runFetch(args[1:])
+	case "amnezia":
+		return runAmnezia(args[1:])
 	case "apply":
 		return runApply(args[1:])
 	case "clear":
@@ -34,6 +36,19 @@ func runFetch(args []string) error {
 		return err
 	}
 	return FetchPrefixes(*license, *country, *out, *mmdb)
+}
+
+func runAmnezia(args []string) error {
+	fs := flag.NewFlagSet("amnezia", flag.ContinueOnError)
+	out := fs.String("out", "amnezia-sites.json", "output Amnezia sites JSON path")
+	country := fs.String("country", "RU", "ISO country code to extract")
+	license := fs.String("license", os.Getenv("MAXMIND_LICENSE_KEY"), "MaxMind license key (CSV download)")
+	mmdb := fs.String("mmdb", "", "path to local GeoIP2/GeoLite2 City or Country MMDB")
+	format := fs.String("format", "official", "JSON shape: official (CIDR in hostname) or ios (CIDR in ip)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return ExportAmnezia(*license, *country, *out, *mmdb, *format)
 }
 
 func runApply(args []string) error {

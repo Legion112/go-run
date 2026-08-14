@@ -3,3 +3,4 @@
 *.key
 .idea/
 data/geo/*.mmdb
+output

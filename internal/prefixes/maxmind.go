@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,14 +14,14 @@ import (
 
 const maxMindDownloadURL = "https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=%s&suffix=zip"
 
-// FetchGeoLite2CountryCSV downloads GeoLite2-Country-CSV, extracts RU (or country) prefixes, writes CIDR list.
-func FetchGeoLite2CountryCSV(licenseKey, countryISO, outPath string) error {
+// DownloadGeoLite2CountryPrefixes downloads GeoLite2-Country-CSV and returns country IPv4 prefixes.
+func DownloadGeoLite2CountryPrefixes(licenseKey, countryISO string) ([]netip.Prefix, error) {
 	if licenseKey == "" {
-		return fmt.Errorf("MAXMIND_LICENSE_KEY / -license is required")
+		return nil, fmt.Errorf("MAXMIND_LICENSE_KEY / -license is required")
 	}
 	tmp, err := os.MkdirTemp("", "gotun-maxmind-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.RemoveAll(tmp)
 
@@ -33,25 +34,29 @@ func FetchGeoLite2CountryCSV(licenseKey, countryISO, outPath string) error {
 		url = fmt.Sprintf("https://download.maxmind.com/app/geoip_download?edition_id=GeoLite2-Country-CSV&license_key=%s&suffix=tar.gz", licenseKey)
 		archivePath = filepath.Join(tmp, "geo.tar.gz")
 		if err2 := download(url, archivePath); err2 != nil {
-			return fmt.Errorf("download: %v (fallback: %w)", err, err2)
+			return nil, fmt.Errorf("download: %v (fallback: %w)", err, err2)
 		}
 		if err := extractTarGz(archivePath, tmp); err != nil {
-			return err
+			return nil, err
 		}
 	} else {
 		// zip: use unzip via archive - Go stdlib has no zip extract of nested easily;
 		// try tar.gz path primarily. If zip, shell out is avoided — use archive/zip.
 		if err := extractZip(archivePath, tmp); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	// Find extracted directory containing CSV files
 	csvDir, err := findCSVDir(tmp)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	prefs, err := ParseMaxMindCountryDir(csvDir, countryISO)
+	return ParseMaxMindCountryDir(csvDir, countryISO)
+}
+
+// FetchGeoLite2CountryCSV downloads GeoLite2-Country-CSV, extracts RU (or country) prefixes, writes CIDR list.
+func FetchGeoLite2CountryCSV(licenseKey, countryISO, outPath string) error {
+	prefs, err := DownloadGeoLite2CountryPrefixes(licenseKey, countryISO)
 	if err != nil {
 		return err
 	}

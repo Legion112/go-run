@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/legion/go-tun/internal/amnezia"
 	"github.com/legion/go-tun/internal/apply"
 	"github.com/legion/go-tun/internal/linux"
 	"github.com/legion/go-tun/internal/policy"
@@ -14,15 +15,36 @@ import (
 
 // FetchPrefixes writes a country prefix list from a local MMDB or MaxMind CSV download.
 func FetchPrefixes(license, country, out, mmdbPath string) error {
-	if mmdbPath != "" {
-		return prefixes.FetchFromMMDB(mmdbPath, country, out)
+	prefs, err := prefixes.LoadCountryPrefixes(license, country, mmdbPath)
+	if err != nil {
+		return err
 	}
-	return prefixes.FetchGeoLite2CountryCSV(license, country, out)
+	return prefixes.WriteCIDRList(out, prefs)
 }
 
 // FetchMaxMind downloads and writes a country prefix list (CSV). Kept for callers.
 func FetchMaxMind(license, country, out string) error {
 	return FetchPrefixes(license, country, out, "")
+}
+
+// ExportAmnezia fetches country prefixes and writes Amnezia site-based split-tunnel JSON.
+// Import into Amnezia with "listed sites bypass VPN" / except-listed mode so country
+// CIDRs go direct and everything else uses the tunnel.
+func ExportAmnezia(license, country, out, mmdbPath, format string) error {
+	siteFormat, err := amnezia.ParseFormat(format)
+	if err != nil {
+		return err
+	}
+	prefs, err := prefixes.LoadCountryPrefixes(license, country, mmdbPath)
+	if err != nil {
+		return err
+	}
+	if err := amnezia.WriteSites(out, prefs, siteFormat); err != nil {
+		return err
+	}
+	fmt.Printf("gotun amnezia: wrote %d sites to %s (format=%s)\n", len(prefs), out, siteFormat)
+	fmt.Println("gotun amnezia: in Amnezia, enable site-based split tunneling with listed sites bypassing the VPN")
+	return nil
 }
 
 // Apply loads prefixes and reconciles kernel state.

@@ -152,10 +152,21 @@ CLI:
 ```bash
 gotun fetch -mmdb data/geo/GeoIP2-City.mmdb -out prefixes.txt -country RU
 gotun fetch -out prefixes.txt -country RU   # CSV download; needs MAXMIND_LICENSE_KEY
+gotun amnezia -mmdb data/geo/GeoIP2-City.mmdb -out amnezia-sites.json -format official
+gotun amnezia -out amnezia-sites.json -format ios   # CSV download; CIDR in ip (iOS import workaround)
 gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg0.conf -tunnel-up true
 gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
 gotun clear
 ```
+
+### Amnezia client export
+
+`gotun amnezia` fetches the same country CIDRs as `gotun fetch`, then writes Amnezia **site-based split tunneling** JSON for import.
+
+- `-format official` (default): `{"hostname":"<cidr>","ip":""}` — documented Amnezia / iplist shape
+- `-format ios`: `{"hostname":"site-N","ip":"<cidr>"}` — workaround when iOS import strips `/prefix` from `hostname`
+
+The JSON does not encode route mode. In the Amnezia app, enable site-based split tunneling and choose the mode where **listed sites bypass the VPN** (country CIDRs go direct; everything else uses the tunnel — same intent as gotun).
 ## Out of scope (v1)
 
 - Userspace SOCKS/proxy

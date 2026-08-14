@@ -65,6 +65,15 @@ func FetchFromMMDB(mmdbPath, countryISO, outPath string) error {
 	return WriteCIDRList(outPath, prefs)
 }
 
+// LoadCountryPrefixes returns country IPv4 prefixes from a local MMDB or MaxMind CSV download.
+// When mmdbPath is non-empty, the MMDB is used; otherwise licenseKey is required for CSV download.
+func LoadCountryPrefixes(licenseKey, countryISO, mmdbPath string) ([]netip.Prefix, error) {
+	if mmdbPath != "" {
+		return ExtractCountryFromMMDB(mmdbPath, countryISO)
+	}
+	return DownloadGeoLite2CountryPrefixes(licenseKey, countryISO)
+}
+
 func ipNetToPrefix(n *net.IPNet) (netip.Prefix, bool) {
 	if n == nil {
 		return netip.Prefix{}, false
