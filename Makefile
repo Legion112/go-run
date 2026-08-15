@@ -1,5 +1,6 @@
 GO ?= go
 BIN := bin/gotun
+BIN_DNS := bin/gotun-dns
 MMDB := data/geo/GeoIP2-City.mmdb
 
 .PHONY: all build test test-integration test-large-set docker-build fetch-prefixes clean
@@ -9,6 +10,7 @@ all: build test
 build:
 	mkdir -p bin
 	$(GO) build -o $(BIN) ./cmd/gotun
+	$(GO) build -o $(BIN_DNS) ./cmd/gotun-dns
 
 test:
 	$(GO) test ./...

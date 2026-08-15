@@ -133,7 +133,7 @@ func Compile(p Policy) (DesiredKernelState, error) {
 }
 
 // routesForTunnel always installs a terminal blackhole in the owned table.
-// When the tunnel is up, a lower-metric device route is preferred; if wg0
+// When the tunnel is up, a lower-metric device route is preferred; if wg-exit
 // disappears without a control-plane reapply, the blackhole remains and
 // marked packets cannot fall through RPDB into main.
 func routesForTunnel(table int, iface string, tunnelUp bool, mode FailMode) []RouteSpec {

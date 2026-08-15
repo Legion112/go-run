@@ -8,10 +8,10 @@ import (
 
 func TestTableRoutesMatch_Exact(t *testing.T) {
 	want := []policy.RouteSpec{
-		{Table: 100, Device: "wg0", Metric: policy.TunnelRouteMetric},
+		{Table: 100, Device: "wg-exit", Metric: policy.TunnelRouteMetric},
 		{Table: 100, Blackhole: true, Metric: policy.FailClosedRouteMetric},
 	}
-	out := "default dev wg0 metric 10 \nblackhole default metric 100\n"
+	out := "default dev wg-exit metric 10 \nblackhole default metric 100\n"
 	if !tableRoutesMatch(out, want) {
 		t.Fatal("expected exact dual-route match")
 	}
@@ -22,7 +22,7 @@ func TestTableRoutesMatch_StaleDeviceRejected(t *testing.T) {
 	want := []policy.RouteSpec{
 		{Table: 100, Blackhole: true, Metric: policy.FailClosedRouteMetric},
 	}
-	out := "default dev wg0 metric 10\nblackhole default metric 100\n"
+	out := "default dev wg-exit metric 10\nblackhole default metric 100\n"
 	if tableRoutesMatch(out, want) {
 		t.Fatal("stale device route must make table mismatch")
 	}
@@ -30,7 +30,7 @@ func TestTableRoutesMatch_StaleDeviceRejected(t *testing.T) {
 
 func TestTableRoutesMatch_SubsetNotEnough(t *testing.T) {
 	want := []policy.RouteSpec{
-		{Table: 100, Device: "wg0", Metric: policy.TunnelRouteMetric},
+		{Table: 100, Device: "wg-exit", Metric: policy.TunnelRouteMetric},
 		{Table: 100, Blackhole: true, Metric: policy.FailClosedRouteMetric},
 	}
 	out := "blackhole default metric 100\n"

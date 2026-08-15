@@ -19,7 +19,7 @@ type Result struct {
 
 // Reconcile applies Policy to the kernel via DesiredKernelState.
 // Order: sysctl → nft → wireguard → ip rules/routes
-// (WireGuard before routes so table 100 can reference wg0).
+// (WireGuard before routes so table 100 can reference wg-exit).
 // On mid-way failure, returns error without rolling back prior subsystems.
 func Reconcile(r linux.Runner, p policy.Policy) (Result, error) {
 	st, err := policy.Compile(p)

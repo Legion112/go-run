@@ -14,7 +14,7 @@ import (
 func basePolicy() policy.Policy {
 	return policy.Policy{
 		DirectPrefixes:  []netip.Prefix{netip.MustParsePrefix("10.200.0.0/24")},
-		TunnelInterface: "wg0",
+		TunnelInterface: "wg-exit",
 		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		FailMode:        policy.FailClosed,

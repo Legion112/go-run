@@ -107,14 +107,14 @@ func setupTopo(t *testing.T) *topo {
 	// Configure WireGuard on exit first
 	must(t, lab.ExecOK(ctx, "exit", "bash", "-c", fmt.Sprintf(`
 set -e
-ip link add dev wg0 type wireguard || true
+ip link add dev wg-exit type wireguard || true
 echo '%s' > /tmp/exit.key
-wg set wg0 private-key /tmp/exit.key listen-port 51820
-wg set wg0 peer %s allowed-ips 10.10.0.0/24,10.99.0.0/30,10.200.0.0/24 endpoint 10.20.0.2:51820 persistent-keepalive 5
-ip address replace 10.99.0.2/30 dev wg0
-ip link set wg0 up
-ip route replace 10.10.0.0/24 dev wg0
-ip route replace 10.200.0.0/24 dev wg0
+wg set wg-exit private-key /tmp/exit.key listen-port 51820
+wg set wg-exit peer %s allowed-ips 10.10.0.0/24,10.99.0.0/30,10.200.0.0/24 endpoint 10.20.0.2:51820 persistent-keepalive 5
+ip address replace 10.99.0.2/30 dev wg-exit
+ip link set wg-exit up
+ip route replace 10.10.0.0/24 dev wg-exit
+ip route replace 10.200.0.0/24 dev wg-exit
 # NAT foreign traffic from tunnel (ip_forward set via docker --sysctl at create)
 nft add table inet exitnat || true
 nft 'add chain inet exitnat postrouting { type nat hook postrouting priority 100 ; }' || true
@@ -127,7 +127,7 @@ nft add rule inet exitnat postrouting oifname != "lo" masquerade || true
 	mustWrite(t, prefPath, "10.200.0.0/24\n")
 	must(t, lab.Copy(ctx, "gotun", prefPath, "/tmp/ru.txt"))
 
-	wgConf := filepath.Join(dir, "wg0.conf")
+	wgConf := filepath.Join(dir, "wg-exit.conf")
 	mustWrite(t, wgConf, fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = 10.99.0.1/30
@@ -139,14 +139,14 @@ Endpoint = 10.20.0.3:51820
 AllowedIPs = 10.30.0.0/24,10.99.0.0/30
 PersistentKeepalive = 5
 `, gotunPriv, exitPub))
-	must(t, lab.Copy(ctx, "gotun", wgConf, "/tmp/wg0.conf"))
+	must(t, lab.Copy(ctx, "gotun", wgConf, "/tmp/wg-exit.conf"))
 
 	// Apply gotun policy (tunnel up)
 	must(t, lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
 	))
 
@@ -171,7 +171,7 @@ func TestHappyPath_RUDirect_ForeignViaExit(t *testing.T) {
 		t.Fatalf("want RU, got %q", ru)
 	}
 
-	// RU should not appear on wg0 counters as significant forwarded foreign — check exit did not serve RU
+	// RU should not appear on wg-exit counters as significant forwarded foreign — check exit did not serve RU
 	// Foreign via tunnel
 	foreign, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.30.0.10:8080/id")
 	if err != nil {
@@ -181,8 +181,8 @@ func TestHappyPath_RUDirect_ForeignViaExit(t *testing.T) {
 		t.Fatalf("want FOREIGN, got %q", foreign)
 	}
 
-	// wg0 should show transfer after foreign
-	wgShow, _ := tp.lab.Exec(ctx, "gotun", "wg", "show", "wg0", "transfer")
+	// wg-exit should show transfer after foreign
+	wgShow, _ := tp.lab.Exec(ctx, "gotun", "wg", "show", "wg-exit", "transfer")
 	if strings.TrimSpace(wgShow) == "" {
 		t.Fatal("expected wg transfer stats")
 	}
@@ -194,10 +194,10 @@ func TestFailClosed_WGDownWithoutReapply(t *testing.T) {
 
 	// Tear down the tunnel datapath without asking gotun to re-apply.
 	// Table 100 must still terminate marked traffic (blackhole fallback).
-	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg0", "down"))
+	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg-exit", "down"))
 
 	if _, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "3", "http://10.30.0.10:8080/id"); err == nil {
-		t.Fatal("foreign should fail when wg0 disappears without reapply (fail-closed)")
+		t.Fatal("foreign should fail when wg-exit disappears without reapply (fail-closed)")
 	}
 	ru, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.200.0.10:8080/id")
 	if err != nil || strings.TrimSpace(ru) != "RU" {
@@ -209,12 +209,12 @@ func TestFailClosed_ApplyTunnelDown(t *testing.T) {
 	tp := setupTopo(t)
 	ctx := context.Background()
 
-	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg0", "down"))
+	must(t, tp.lab.ExecOK(ctx, "gotun", "ip", "link", "set", "dev", "wg-exit", "down"))
 	must(t, tp.lab.ExecOK(ctx, "gotun", "gotun", "apply",
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "false",
 	))
 
@@ -231,13 +231,13 @@ func TestEndpointExclusion(t *testing.T) {
 	tp := setupTopo(t)
 	ctx := context.Background()
 
-	// Ping WG endpoint underlay IP from gotun — must use underlay not wg0
+	// Ping WG endpoint underlay IP from gotun — must use underlay not wg-exit
 	out, err := tp.lab.Exec(ctx, "gotun", "ip", "route", "get", "10.20.0.3")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(out, "dev wg0") {
-		t.Fatalf("endpoint routed via wg0 (recursive): %s", out)
+	if strings.Contains(out, "dev wg-exit") {
+		t.Fatalf("endpoint routed via wg-exit (recursive): %s", out)
 	}
 	_ = netip.MustParseAddr("10.20.0.3")
 }
@@ -250,7 +250,7 @@ func TestIdempotentApply(t *testing.T) {
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
 	)
 	if err != nil {
@@ -294,7 +294,7 @@ func TestAtomicPrefixSwapUnderTraffic(t *testing.T) {
 		"-prefixes", "/tmp/ru2.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
 	))
 
@@ -321,7 +321,7 @@ func TestPartialFailureThenReapply(t *testing.T) {
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24,10.20.0.0/24,10.200.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-tunnel-up", "true",
 	))
 	foreign, err := tp.lab.Exec(ctx, "client", "curl", "-s", "--max-time", "5", "http://10.30.0.10:8080/id")

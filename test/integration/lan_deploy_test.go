@@ -109,14 +109,14 @@ nft add rule inet filter forward iifname "$WAN_IF" oifname "$DMZ_IF" udp dport 5
 
 	must(t, lab.ExecOK(ctx, "exit", "bash", "-c", fmt.Sprintf(`
 set -e
-ip link add dev wg0 type wireguard || true
+ip link add dev wg-exit type wireguard || true
 echo '%s' > /tmp/exit.key
-wg set wg0 private-key /tmp/exit.key listen-port 51820
-wg set wg0 peer %s allowed-ips 10.10.0.0/24,10.99.0.0/30,10.200.0.0/24 endpoint 10.20.0.2:51820 persistent-keepalive 5
-ip address replace 10.99.0.2/30 dev wg0
-ip link set wg0 up
-ip route replace 10.10.0.0/24 dev wg0
-ip route replace 10.200.0.0/24 dev wg0
+wg set wg-exit private-key /tmp/exit.key listen-port 51820
+wg set wg-exit peer %s allowed-ips 10.10.0.0/24,10.99.0.0/30,10.200.0.0/24 endpoint 10.20.0.2:51820 persistent-keepalive 5
+ip address replace 10.99.0.2/30 dev wg-exit
+ip link set wg-exit up
+ip route replace 10.10.0.0/24 dev wg-exit
+ip route replace 10.200.0.0/24 dev wg-exit
 nft add table inet exitnat || true
 nft 'add chain inet exitnat postrouting { type nat hook postrouting priority 100 ; }' || true
 nft add rule inet exitnat postrouting oifname != "lo" masquerade || true
@@ -127,7 +127,7 @@ nft add rule inet exitnat postrouting oifname != "lo" masquerade || true
 	mustWrite(t, prefPath, "10.200.0.0/24\n")
 	must(t, lab.Copy(ctx, "gotun", prefPath, "/tmp/ru.txt"))
 
-	wgExit := filepath.Join(dir, "wg0.conf")
+	wgExit := filepath.Join(dir, "wg-exit.conf")
 	mustWrite(t, wgExit, fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = 10.99.0.1/30
@@ -139,7 +139,7 @@ Endpoint = 10.20.0.3:51820
 AllowedIPs = 10.30.0.0/24,10.99.0.0/30
 PersistentKeepalive = 5
 `, gotunPriv, exitPub))
-	must(t, lab.Copy(ctx, "gotun", wgExit, "/tmp/wg0.conf"))
+	must(t, lab.Copy(ctx, "gotun", wgExit, "/tmp/wg-exit.conf"))
 
 	wgClients := filepath.Join(dir, "wg-clients.conf")
 	mustWrite(t, wgClients, fmt.Sprintf(`[Interface]
@@ -157,7 +157,7 @@ AllowedIPs = 10.98.0.2/32
 		"-prefixes", "/tmp/ru.txt",
 		"-endpoint", "10.20.0.3",
 		"-lan", "10.10.0.0/24",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-wg-clients-config", "/tmp/wg-clients.conf",
 		"-tunnel-up", "true",
 	))

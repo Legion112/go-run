@@ -12,7 +12,7 @@ func testPolicy(tunnelUp bool) policy.Policy {
 		DirectPrefixes: []netip.Prefix{
 			netip.MustParsePrefix("10.200.0.0/24"),
 		},
-		TunnelInterface: "wg0",
+		TunnelInterface: "wg-exit",
 		TunnelEndpoint:  netip.MustParseAddr("10.10.0.2"),
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		Mark:            policy.DefaultMark,
@@ -83,7 +83,7 @@ func TestCompile_TunnelUpKeepsFailClosedFallback(t *testing.T) {
 	}
 	var haveDev, haveBH bool
 	for _, rt := range st.Routes {
-		if rt.Device == "wg0" && rt.Metric == policy.TunnelRouteMetric && !rt.Blackhole {
+		if rt.Device == "wg-exit" && rt.Metric == policy.TunnelRouteMetric && !rt.Blackhole {
 			haveDev = true
 		}
 		if rt.Blackhole && rt.Metric == policy.FailClosedRouteMetric {
@@ -91,7 +91,7 @@ func TestCompile_TunnelUpKeepsFailClosedFallback(t *testing.T) {
 		}
 	}
 	if !haveDev || !haveBH {
-		t.Fatalf("want wg0 metric %d + blackhole metric %d, got %+v",
+		t.Fatalf("want wg-exit metric %d + blackhole metric %d, got %+v",
 			policy.TunnelRouteMetric, policy.FailClosedRouteMetric, st.Routes)
 	}
 }

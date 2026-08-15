@@ -14,7 +14,7 @@ Gateway split-tunnel for client traffic: clients keep local LAN on-link and send
 Client --LAN on-link--> local peers
 Client --default------> gotun
                           |-- dst in ru_nets --> direct
-                          |-- else          --> wg0 --> exit (outside RU)
+                          |-- else          --> wg-exit --> exit (outside RU)
 ```
 
 Control flow:
@@ -47,9 +47,9 @@ make test-large-set     # GOTUN_LARGE_SET=1; Docker --network none; needs local 
 
 ## Fail-closed + endpoint exclusion
 
-Table **100 always** ends with a terminal **blackhole** default (high metric). When the tunnel is up, a lower-metric `default dev wg0` is preferred. If `wg0` disappears **without** a control-plane reapply, marked (non-RU) traffic still hits the blackhole and does **not** fall through RPDB into the ISP/`main` table. `-tunnel-up=false` installs only the blackhole. RU (unmarked) traffic continues on the main table.
+Table **100 always** ends with a terminal **blackhole** default (high metric). When the tunnel is up, a lower-metric `default dev wg-exit` is preferred. If `wg-exit` disappears **without** a control-plane reapply, marked (non-RU) traffic still hits the blackhole and does **not** fall through RPDB into the ISP/`main` table. `-tunnel-up=false` installs only the blackhole. RU (unmarked) traffic continues on the main table.
 
-The WireGuard **underlay endpoint IP** is excluded from marking so handshake/path cannot recurse into `wg0`.
+The WireGuard **underlay endpoint IP** is excluded from marking so handshake/path cannot recurse into `wg-exit`.
 
 ## Why nftables
 
@@ -61,7 +61,7 @@ Reconciler only touches objects it owns:
 
 - nftables table **`inet gotun`**
 - routing table **`100`** and ip rule priority **`100`**
-- WireGuard interface from policy (default `wg0`) when managed
+- WireGuard interface from policy (default `wg-exit`) when managed
 
 `gotun clear` deletes those owned objects only.
 
@@ -75,7 +75,7 @@ v1 has **no** cross-subsystem transaction (nft + netlink + WireGuard). On mid-ap
 
 ## DNS (v1)
 
-Classification is **IP-destination based**. Whatever address the client’s resolver returns is what gotun classifies. DNS interception / split DNS is out of scope for v1 (see TODO).
+Packet classification remains **IP-destination based**. Companion **`gotun-dns`** provides domain-suffix split resolver egress (Direct vs Exit); see [Split DNS](#split-dns-gotun-dns). nft DNS redirect is still out of scope — clients must point DNS at the gateway explicitly.
 
 ## IPv6 (v1)
 
@@ -91,10 +91,10 @@ Outbound split lab containers: `client`, `gotun`, `exit`, `ru-dest`, `foreign-de
 
 | Path | Expected |
 |------|----------|
-| client → RU IP | via gotun direct (not wg0/exit) |
-| client → foreign IP | via gotun wg0 → exit |
+| client → RU IP | via gotun direct (not wg-exit/exit) |
+| client → foreign IP | via gotun wg-exit → exit |
 | WG down (no reapply) | foreign fails; RU works |
-| endpoint IP | not via wg0 |
+| endpoint IP | not via wg-exit |
 
 ## LAN / Pi deployment
 
@@ -111,7 +111,7 @@ Apply with a second config for the clients listen interface:
 ```bash
 gotun apply -prefixes prefixes.txt -endpoint <exit-underlay> \
   -lan 192.168.1.0/24 \
-  -wg-config wg0.conf \
+  -wg-config wg-exit.conf \
   -wg-clients-config wg-clients.conf \
   -tunnel-up true
 ```
@@ -154,7 +154,7 @@ gotun fetch -mmdb data/geo/GeoIP2-City.mmdb -out prefixes.txt -country RU
 gotun fetch -out prefixes.txt -country RU   # CSV download; needs MAXMIND_LICENSE_KEY
 gotun amnezia -mmdb data/geo/GeoIP2-City.mmdb -out amnezia-sites.json -format official
 gotun amnezia -out amnezia-sites.json -format ios   # CSV download; CIDR in ip (iOS import workaround)
-gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg0.conf -tunnel-up true
+gotun apply -prefixes prefixes.txt -endpoint 10.20.0.2 -lan 10.10.0.0/24 -wg-config wg-exit.conf -tunnel-up true
 gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients iface + home isolation
 gotun clear
 ```
@@ -171,11 +171,38 @@ By default, `gotun fetch`, `gotun apply`, and `gotun amnezia` run **`CollapseIPv
 - `-format ios`: `{"hostname":"site-N","ip":"<cidr>"}` — workaround when iOS import strips `/prefix` from `hostname`
 
 The JSON does not encode route mode. In the Amnezia app, enable site-based split tunneling and choose the mode where **listed sites bypass the VPN** (country CIDRs go direct; everything else uses the tunnel — same intent as gotun).
+
+### Split DNS (`gotun-dns`)
+
+Companion binary on the **gateway** (not inside `gotun apply`). Clients / Amnezia should use the gateway IP as DNS instead of the remote hop’s resolver so GeoDNS (e.g. Yandex Lavka) sees a RU egress for `.ru` names.
+
+```bash
+gotun-dns -listen :53 \
+  -direct-upstream 77.88.8.8:53 \
+  -exit-upstream 1.1.1.1:53 \
+  -mark 0x1
+```
+
+| Name class | Path | Dial |
+|------------|------|------|
+| ends with `.ru` | **Direct** | unmarked → main / ISP |
+| everything else | **Exit** | `SO_MARK` (default `0x1`, same as `gotun apply`) → table 100 → `wg-exit` |
+
+**Capabilities:** `CAP_NET_BIND_SERVICE` to bind `:53` as non-root; `CAP_NET_ADMIN` (or `CAP_NET_RAW` where supported) for Exit-path `SO_MARK`. Without the mark capability, Direct queries may work while Exit lookups fail with `EPERM`.
+
+UDP responses with **TC** are retried over TCP on the **same** Direct/Exit dialer. Truncation fallback is implemented in gotun-dns (miekg does not auto-retry).
+
+**DNS vs packet policy:** DNS policy only chooses **resolver egress**. nftables still classifies the returned A/AAAA via `ru_nets` independently. A Direct resolve that yields a non-RU CDN edge can still be sent via `wg-exit`. Future work: TTL-bound `dns_direct_nets` learned from Direct answers (not in this milestone).
+
+Interfaces: exit hop default **`wg-exit`**; inbound clients **`wg-clients`**.
+
+GeoDNS lab: `TestDNSSplit_GeoEgressIdentity` under `make test-integration` (`labdns` answers by query source IP).
+
 ## Out of scope (v1)
 
 - Userspace SOCKS/proxy
 - IPv6 split routing
-- DNS interception
+- nft/iptables forced DNS redirect
 - iptables+ipset backend
 - Fail-open on tunnel loss
 - Cross-subsystem rollback
@@ -186,7 +213,7 @@ The JSON does not encode route mode. In the Amnezia app, enable site-based split
 Do **not** implement these until the v1 core (build, unit tests, integration invariants) is green:
 
 - [ ] **IPv6 support** — `ru_nets6`, mark + policy routing; stop blanket disable/drop
-- [ ] **DNS** — forced resolver / split DNS so DNS cannot bypass RU/non-RU policy
+- [ ] **DNS → packet coupling** — learn Direct-path A/AAAA into TTL-bound `dns_direct_nets`
 - [ ] **Fail-open mode** — optional ISP fallback when WG is down
 - [ ] **Prefix source refresh** — scheduled/atomic MaxMind updates in production
 - [ ] **Observability** — counters for marked vs direct, set size, reconcile errors

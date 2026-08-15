@@ -150,14 +150,14 @@ ip route replace 10.56.0.0/24 via 10.55.0.2
 	// remote-hop: exit WG + SNAT toward non-RU
 	must(t, lab.ExecOK(ctx, "remote-hop", "bash", "-c", fmt.Sprintf(`
 set -e
-ip link add dev wg0 type wireguard || true
+ip link add dev wg-exit type wireguard || true
 echo '%s' > /tmp/hop.key
-wg set wg0 private-key /tmp/hop.key listen-port 51820
-wg set wg0 peer %s allowed-ips 10.98.0.0/30,10.56.0.0/24,10.50.0.0/24 persistent-keepalive 5
-ip address replace 10.99.0.2/30 dev wg0
-ip link set wg0 up
-ip route replace 10.98.0.0/30 dev wg0
-ip route replace 10.56.0.0/24 dev wg0
+wg set wg-exit private-key /tmp/hop.key listen-port 51820
+wg set wg-exit peer %s allowed-ips 10.98.0.0/30,10.56.0.0/24,10.50.0.0/24 persistent-keepalive 5
+ip address replace 10.99.0.2/30 dev wg-exit
+ip link set wg-exit up
+ip route replace 10.98.0.0/30 dev wg-exit
+ip route replace 10.56.0.0/24 dev wg-exit
 nft add table inet hopnat
 nft 'add chain inet hopnat postrouting { type nat hook postrouting priority 100 ; }'
 nft add rule inet hopnat postrouting oifname != "lo" masquerade
@@ -168,7 +168,7 @@ nft add rule inet hopnat postrouting oifname != "lo" masquerade
 	mustWrite(t, prefPath, "10.52.0.0/24\n")
 	must(t, lab.Copy(ctx, "pi", prefPath, "/tmp/ru.txt"))
 
-	wgExit := filepath.Join(dir, "wg0.conf")
+	wgExit := filepath.Join(dir, "wg-exit.conf")
 	mustWrite(t, wgExit, fmt.Sprintf(`[Interface]
 PrivateKey = %s
 Address = 10.99.0.1/30
@@ -180,7 +180,7 @@ Endpoint = %s:51820
 AllowedIPs = 10.54.0.0/24,10.99.0.0/30
 PersistentKeepalive = 5
 `, piPriv, hopPub, deployRemoteHop))
-	must(t, lab.Copy(ctx, "pi", wgExit, "/tmp/wg0.conf"))
+	must(t, lab.Copy(ctx, "pi", wgExit, "/tmp/wg-exit.conf"))
 
 	wgClients := filepath.Join(dir, "wg-clients.conf")
 	mustWrite(t, wgClients, fmt.Sprintf(`[Interface]
@@ -199,7 +199,7 @@ AllowedIPs = 10.98.0.2/32
 		"-endpoint", deployRemoteHop,
 		// home LAN + clients WG subnet (return path must not be marked into table 100)
 		"-lan", "10.56.0.0/24,10.98.0.0/30",
-		"-wg-config", "/tmp/wg0.conf",
+		"-wg-config", "/tmp/wg-exit.conf",
 		"-wg-clients-config", "/tmp/wg-clients.conf",
 		"-tunnel-up", "true",
 	))
@@ -313,8 +313,8 @@ ip route replace 10.56.0.0/24 dev wg-clients
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(rt, "dev wg0") {
-		t.Fatalf("endpoint underlay must not use wg0: %q", rt)
+	if strings.Contains(rt, "dev wg-exit") {
+		t.Fatalf("endpoint underlay must not use wg-exit: %q", rt)
 	}
 	// Locally generated WG packets skip prerouting; probe via client tunnel so Pi prerouting sees daddr=endpoint.
 	_, _ = lab.Exec(ctx, "client", "ping", "-c", "3", "-W", "2", deployRemoteHop)

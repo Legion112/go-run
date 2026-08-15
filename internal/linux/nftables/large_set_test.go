@@ -38,7 +38,7 @@ func TestLargeRUSet_CompileAndRender(t *testing.T) {
 	start := time.Now()
 	st, err := policy.Compile(policy.Policy{
 		DirectPrefixes:  prefs,
-		TunnelInterface: "wg0",
+		TunnelInterface: "wg-exit",
 		TunnelEndpoint:  netip.MustParseAddr("10.20.0.3"),
 		LANs:            []netip.Prefix{netip.MustParsePrefix("10.10.0.0/24")},
 		FailMode:        policy.FailClosed,

@@ -18,12 +18,12 @@ const (
 	DefaultMark         uint32 = 0x1
 	DefaultTableID             = 100
 	DefaultRulePriority        = 100
-	DefaultTunnelIface         = "wg0"
+	DefaultTunnelIface         = "wg-exit"
 	DefaultClientsIface        = "wg-clients"
 	RuNetsSetName              = "ru_nets"
 	HomeNetsSetName            = "home_nets"
 
-	// TunnelRouteMetric is preferred while wg0 is usable.
+	// TunnelRouteMetric is preferred while wg-exit is usable.
 	TunnelRouteMetric = 10
 	// FailClosedRouteMetric is the permanent terminal fallback in table 100.
 	// Marked packets must never fall through to main if the tunnel route disappears.
@@ -42,7 +42,7 @@ type Policy struct {
 	FailMode        FailMode
 	// TunnelUp indicates whether the WireGuard interface should carry traffic.
 	// When true, table 100 prefers default via the tunnel device; a higher-metric
-	// blackhole always remains so an unexpected wg0 loss cannot fall through to main.
+	// blackhole always remains so an unexpected wg-exit loss cannot fall through to main.
 	// When false, only the blackhole is installed.
 	TunnelUp bool
 	// WireGuard holds keys/peers when apply manages the exit interface.
@@ -56,7 +56,7 @@ type Policy struct {
 type WireGuardConfig struct {
 	PrivateKey string
 	ListenPort int
-	Address    netip.Prefix // tunnel address on wg0
+	Address    netip.Prefix // tunnel address on wg-exit
 	Peer       WireGuardPeer
 }
 
@@ -74,7 +74,7 @@ type DesiredKernelState struct {
 	Nft              NftSpec
 	IPRules          []IPRuleSpec
 	Routes           []RouteSpec
-	WireGuard        WireGuardSpec // exit hop (wg0)
+	WireGuard        WireGuardSpec // exit hop (wg-exit)
 	WireGuardClients WireGuardSpec // inbound clients (wg-clients); Managed=false if unused
 }
 
@@ -141,7 +141,7 @@ type RouteSpec struct {
 	Destination netip.Prefix // default = 0.0.0.0/0
 	// Blackhole when true installs an unreachable/blackhole default (fail-closed).
 	Blackhole bool
-	Device    string // e.g. wg0 when tunnel is up
+	Device    string // e.g. wg-exit when tunnel is up
 	Metric    int    // lower wins; 0 means kernel default
 }
 
