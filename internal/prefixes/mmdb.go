@@ -62,16 +62,27 @@ func FetchFromMMDB(mmdbPath, countryISO, outPath string) error {
 	if err != nil {
 		return err
 	}
-	return WriteCIDRList(outPath, prefs)
+	return WriteCIDRList(outPath, CollapseIPv4(prefs))
 }
 
-// LoadCountryPrefixes returns country IPv4 prefixes from a local MMDB or MaxMind CSV download.
-// When mmdbPath is non-empty, the MMDB is used; otherwise licenseKey is required for CSV download.
-func LoadCountryPrefixes(licenseKey, countryISO, mmdbPath string) ([]netip.Prefix, error) {
+// LoadCountryPrefixesRaw returns country IPv4 prefixes without collapsing.
+// Prefer LoadCountryPrefixes for configuration paths.
+func LoadCountryPrefixesRaw(licenseKey, countryISO, mmdbPath string) ([]netip.Prefix, error) {
 	if mmdbPath != "" {
 		return ExtractCountryFromMMDB(mmdbPath, countryISO)
 	}
 	return DownloadGeoLite2CountryPrefixes(licenseKey, countryISO)
+}
+
+// LoadCountryPrefixes returns country IPv4 prefixes from a local MMDB or MaxMind CSV download,
+// collapsed with CollapseIPv4 for configuration use.
+// When mmdbPath is non-empty, the MMDB is used; otherwise licenseKey is required for CSV download.
+func LoadCountryPrefixes(licenseKey, countryISO, mmdbPath string) ([]netip.Prefix, error) {
+	prefs, err := LoadCountryPrefixesRaw(licenseKey, countryISO, mmdbPath)
+	if err != nil {
+		return nil, err
+	}
+	return CollapseIPv4(prefs), nil
 }
 
 func ipNetToPrefix(n *net.IPNet) (netip.Prefix, bool) {

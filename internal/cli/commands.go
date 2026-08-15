@@ -15,11 +15,16 @@ import (
 
 // FetchPrefixes writes a country prefix list from a local MMDB or MaxMind CSV download.
 func FetchPrefixes(license, country, out, mmdbPath string) error {
-	prefs, err := prefixes.LoadCountryPrefixes(license, country, mmdbPath)
+	raw, err := prefixes.LoadCountryPrefixesRaw(license, country, mmdbPath)
 	if err != nil {
 		return err
 	}
-	return prefixes.WriteCIDRList(out, prefs)
+	collapsed := prefixes.CollapseIPv4(raw)
+	if err := prefixes.WriteCIDRList(out, collapsed); err != nil {
+		return err
+	}
+	fmt.Printf("gotun fetch: collapsed %d → %d prefixes → %s\n", len(raw), len(collapsed), out)
+	return nil
 }
 
 // FetchMaxMind downloads and writes a country prefix list (CSV). Kept for callers.
@@ -35,14 +40,15 @@ func ExportAmnezia(license, country, out, mmdbPath, format string) error {
 	if err != nil {
 		return err
 	}
-	prefs, err := prefixes.LoadCountryPrefixes(license, country, mmdbPath)
+	raw, err := prefixes.LoadCountryPrefixesRaw(license, country, mmdbPath)
 	if err != nil {
 		return err
 	}
-	if err := amnezia.WriteSites(out, prefs, siteFormat); err != nil {
+	collapsed := prefixes.CollapseIPv4(raw)
+	if err := amnezia.WriteSites(out, collapsed, siteFormat); err != nil {
 		return err
 	}
-	fmt.Printf("gotun amnezia: wrote %d sites to %s (format=%s)\n", len(prefs), out, siteFormat)
+	fmt.Printf("gotun amnezia: collapsed %d → %d sites → %s (format=%s)\n", len(raw), len(collapsed), out, siteFormat)
 	fmt.Println("gotun amnezia: in Amnezia, enable site-based split tunneling with listed sites bypassing the VPN")
 	return nil
 }
@@ -73,6 +79,7 @@ func Apply(prefixesPath, endpoint, wgConfig, wgClientsConfig, lanCSV string, tun
 	if err != nil {
 		return err
 	}
+	prefs = prefixes.CollapseIPv4(prefs)
 
 	var lans []netip.Prefix
 	if lanCSV != "" {

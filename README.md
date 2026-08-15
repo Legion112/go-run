@@ -159,9 +159,13 @@ gotun apply ... -wg-clients-config wg-clients.conf   # optional inbound clients 
 gotun clear
 ```
 
+### Prefix collapse (default)
+
+By default, `gotun fetch`, `gotun apply`, and `gotun amnezia` run **`CollapseIPv4`** at the configuration boundary: canonicalize, dedupe, drop covered prefixes, and merge sibling CIDRs. Coverage is unchanged (same IPv4 address union); only the representation shrinks (often ~70k → ~12k for a full RU extract). Low-level parsers stay uncollapsed so parse/extract tests remain exact. `gotun apply` also collapses whatever file you pass, so older unaggregated `prefixes.txt` files still benefit.
+
 ### Amnezia client export
 
-`gotun amnezia` fetches the same country CIDRs as `gotun fetch`, then writes Amnezia **site-based split tunneling** JSON for import.
+`gotun amnezia` fetches the same country CIDRs as `gotun fetch` (after collapse), then writes Amnezia **site-based split tunneling** JSON for import.
 
 - `-format official` (default): `{"hostname":"<cidr>","ip":""}` — documented Amnezia / iplist shape
 - `-format ios`: `{"hostname":"site-N","ip":"<cidr>"}` — workaround when iOS import strips `/prefix` from `hostname`
